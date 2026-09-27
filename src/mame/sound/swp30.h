@@ -94,6 +94,7 @@ public:
 	static constexpr s32 SERIAL_FULL_SCALE = 1 << 26;
 	s32  melo(int i) const { return std::clamp(m_melo[i], -SERIAL_FULL_SCALE, SERIAL_FULL_SCALE); }
 	void set_meli(int i, s32 v) { m_meli[i] = v; }
+	void set_external_fx_buses(const std::array<s32, 10> &buses) { m_external_fx_buses = buses; }
 
 	// S-MU2000: 音が出ないときの手掛かり
 	s32 m_dbg_adc_max = 0, m_dbg_meg_max = 0, m_dbg_awm_max = 0;
@@ -512,6 +513,7 @@ private:
 
 	std::array<s32,  0x10> m_melo = {};
 	std::array<s32,  0x10> m_meli = {};
+	std::array<s32, 10> m_external_fx_buses = {};
 	std::array<s32,     4> m_adc = {};
 
 	// S-MU2000: 軽量モードの繋ぎ先（mu2000 が持っている）。ミキサから MEG への送りを

@@ -6,10 +6,12 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 using namespace smu2000::vsti;
@@ -29,6 +31,92 @@ bool finite_audio(const std::vector<float> &v)
 		if (!std::isfinite(x))
 			return false;
 	return true;
+}
+
+bool probe_hybrid_fx(effect *fx, double sample_rate)
+{
+	if (fx->num_inputs != 10) {
+		std::fprintf(stderr, "hybrid FX requires ten input buses, got %d\n", fx->num_inputs);
+		return false;
+	}
+	constexpr int block = 256;
+	std::vector<float> silence(block), signal(block), left(block), right(block);
+	float *inputs[10] = {};
+	float *outputs[2] = { left.data(), right.data() };
+	for (float *&input : inputs)
+		input = silence.data();
+	// Let the firmware initialise the MEG program before probing its buses.
+	std::this_thread::sleep_for(std::chrono::seconds(2));
+	for (int i = 0; i < 500; i++)
+		fx->process_replacing(fx, inputs, outputs, block);
+	for (int i = 0; i < block; i++)
+		signal[i] = 0.2f * std::sin(2.0 * 3.141592653589793 * 440.0 * i / sample_rate);
+	auto measure = [&](int bus) {
+		inputs[bus] = signal.data();
+		double early = 0.0, tail = 0.0;
+		for (int i = 0; i < 8; i++) {
+			fx->process_replacing(fx, inputs, outputs, block);
+			for (float sample : left)
+				early += double(sample) * sample;
+		}
+		inputs[bus] = silence.data();
+		for (int i = 0; i < 100; i++) {
+			fx->process_replacing(fx, inputs, outputs, block);
+			for (float sample : left)
+				tail += double(sample) * sample;
+		}
+		return std::pair<double, double>{early, tail};
+	};
+	const auto dry = measure(0);
+	const auto reverb = measure(2);
+	const auto chorus = measure(4);
+	char insertion_type[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
+	                          0x00, 0x00, 0x49, 0x00, char(0xf7) };
+	char insertion_part[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
+	                          0x00, 0x0c, 0x00, char(0xf7) };
+	sysex_event ins_type_event{}, ins_part_event{};
+	ins_type_event.type = ins_part_event.type = sysex_type;
+	ins_type_event.byte_size = ins_part_event.byte_size = sysex_event_byte_size;
+	ins_type_event.dump = insertion_type;
+	ins_type_event.dump_bytes = sizeof(insertion_type);
+	ins_part_event.dump = insertion_part;
+	ins_part_event.dump_bytes = sizeof(insertion_part);
+	struct { vint32 count; vintptr reserved; event *items[2]; } insertion_setup{};
+	insertion_setup.count = 2;
+	insertion_setup.items[0] = reinterpret_cast<event *>(&ins_type_event);
+	insertion_setup.items[1] = reinterpret_cast<event *>(&ins_part_event);
+	fx->dispatcher(fx, eff_process_events, 0, 0, &insertion_setup, 0);
+	for (int i = 0; i < 100; i++)
+		fx->process_replacing(fx, inputs, outputs, block);
+	const auto insertion = measure(8);
+	char variation_type[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02, 0x01,
+	                          0x40, 0x05, 0x00, char(0xf7) };
+	char variation_system[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02,
+	                            0x01, 0x5a, 0x01, char(0xf7) };
+	sysex_event type_event{}, system_event{};
+	type_event.type = system_event.type = sysex_type;
+	type_event.byte_size = system_event.byte_size = sysex_event_byte_size;
+	type_event.dump = variation_type;
+	type_event.dump_bytes = sizeof(variation_type);
+	system_event.dump = variation_system;
+	system_event.dump_bytes = sizeof(variation_system);
+	struct { vint32 count; vintptr reserved; event *items[2]; } setup{};
+	setup.count = 2;
+	setup.items[0] = reinterpret_cast<event *>(&type_event);
+	setup.items[1] = reinterpret_cast<event *>(&system_event);
+	fx->dispatcher(fx, eff_process_events, 0, 0, &setup, 0);
+	for (int i = 0; i < 100; i++)
+		fx->process_replacing(fx, inputs, outputs, block);
+	const auto variation = measure(6);
+	std::printf("hybrid buses: dry %.8g / %.8g, reverb %.8g / %.8g, "
+	            "chorus %.8g / %.8g, insertion %.8g / %.8g, "
+	            "variation %.8g / %.8g (early/tail)\n",
+	            dry.first, dry.second, reverb.first, reverb.second,
+	            chorus.first, chorus.second, insertion.first, insertion.second,
+	            variation.first, variation.second);
+	return dry.first > 1e-5 && reverb.second > 1e-4
+		&& chorus.second > 1e-4 && insertion.first > 1e-3
+		&& variation.second > 1e-4;
 }
 
 // **冷えた起動の試験**（--coldstate。issue #51）。vstmididrv のように、起動が終わる前に
@@ -85,6 +173,8 @@ int main(int argc, char **argv)
 	const char *path = argc > 1 ? argv[1] : "build/S-MU2000.dll";
 	const bool require_audio = argc > 2 && !std::strcmp(argv[2], "--audio");
 	const bool coldstate = argc > 2 && !std::strcmp(argv[2], "--coldstate");
+	const bool hybrid_fx = argc > 2 && !std::strcmp(argv[2], "--hybrid-fx");
+	const bool hybrid_fx_48 = argc > 2 && !std::strcmp(argv[2], "--hybrid-fx-48");
 	HMODULE module = LoadLibraryA(path);
 	if (!module) {
 		std::fprintf(stderr, "cannot load %s (%lu)\n", path, GetLastError());
@@ -110,9 +200,17 @@ int main(int argc, char **argv)
 	}
 
 	fx->dispatcher(fx, eff_open, 0, 0, nullptr, 0);
-	fx->dispatcher(fx, eff_set_sample_rate, 0, 0, nullptr, 44100.0f);
+	fx->dispatcher(fx, eff_set_sample_rate, 0, 0, nullptr,
+	               hybrid_fx_48 ? 48000.0f : 44100.0f);
 	fx->dispatcher(fx, eff_set_block_size, 0, 64, nullptr, 0);
 	fx->dispatcher(fx, eff_mains_changed, 0, 1, nullptr, 0);
+	if (hybrid_fx || hybrid_fx_48) {
+		const bool passed = probe_hybrid_fx(fx, hybrid_fx_48 ? 48000.0 : 44100.0);
+		fx->dispatcher(fx, eff_mains_changed, 0, 0, nullptr, 0);
+		fx->dispatcher(fx, eff_close, 0, 0, nullptr, 0);
+		FreeLibrary(module);
+		return passed ? 0 : 4;
+	}
 
 	midi_event note{};
 	note.type = midi_type;

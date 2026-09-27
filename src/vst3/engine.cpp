@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -64,7 +65,10 @@ std::string read_pointer_file(const std::string &path)
 	while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
 	                      s.back() == ' '  || s.back() == '\t'))
 		s.pop_back();
-	return s;
+	const std::filesystem::path specified(std::u8string(s.begin(), s.end()));
+	const std::filesystem::path resolved = specified.is_relative()
+		? std::filesystem::path(path).parent_path() / specified : specified;
+	return resolved.lexically_normal().string();
 }
 
 // ---- 記録。画面が無いので、うまくいかなかったときはここを見てもらう
@@ -508,9 +512,18 @@ void engine::set_output_rate(double rate)
 	// 下へ変換するときは出力のナイキストで切らないと折り返す
 	m_cutoff = std::min(1.0, rate / NATIVE_RATE) * 0.955;
 	// 音源側は「必要な先の音」をその場で作れるので、変換に先読みの遅れは無い
-	m_latency = 0;
+	m_latency = m_direct ? 0 : uint32_t(std::ceil(HALF * rate / NATIVE_RATE));
 	m_in_rs.configure(rate, NATIVE_RATE);
 	m_in_w = m_in_r = 0;
+	for (auto &rs : m_fx_rs)
+		rs.configure(rate, NATIVE_RATE);
+	m_fx_w = m_fx_r = 0;
+	// The incoming sinc converters retain 32 frames of history. Prime their
+	// shared queue so every native render step receives one frame, including
+	// the first block before the history is available.
+	if (!m_direct)
+		for (int i = 0; i != HALF; i++)
+			m_fx_w = (m_fx_w + 1) & IN_MASK;
 	flush_resampler();
 }
 
@@ -519,12 +532,25 @@ void engine::flush_resampler()
 	std::memset(m_ring_l, 0, sizeof(m_ring_l));
 	std::memset(m_ring_r, 0, sizeof(m_ring_r));
 	m_written = 0;
-	m_pos     = 0.0;
+	m_pos     = m_direct ? 0.0 : -double(HALF);
 }
 
-void engine::one_sample(float &l, float &r)
+void engine::one_sample(float &l, float &r, const float *const *fx_buses, int frame)
 {
 	s32 li = 0, ri = 0;
+	std::array<float, 10> buses{};
+	if (fx_buses)
+		for (int i = 0; i != 10; i++)
+			buses[i] = fx_buses[i] ? fx_buses[i][frame] : 0.0f;
+	if (!m_direct) {
+		buses.fill(0.0f);
+		if (m_fx_r != m_fx_w) {
+			for (int i = 0; i != 10; i++)
+				buses[i] = m_fx_q[m_fx_r * 10 + i];
+			m_fx_r = (m_fx_r + 1) & IN_MASK;
+		}
+	}
+	m_mu->set_external_fx_buses(buses);
 	// A/D INPUT。溜めが空なら無音（入力の変換器の先読みの分だけ、頭が少し欠ける）
 	if (m_in_r != m_in_w) {
 		m_mu->set_audio_input(m_in_q[m_in_r * 2], m_in_q[m_in_r * 2 + 1]);
@@ -617,6 +643,46 @@ void engine::push_input(const float *in_l, const float *in_r, int n)
 	}
 }
 
+void engine::push_fx_buses(const float *const *buses, int n)
+{
+	if (n <= 0)
+		return;
+	for (int at = 0; at < n;) {
+		const int k = std::min(1024, n - at);
+		for (int pair = 0; pair != 5; pair++) {
+			m_fx_stage.resize(size_t(k) * 2);
+			for (int i = 0; i != k; i++)
+				for (int side = 0; side != 2; side++) {
+					const int bus = pair * 2 + side;
+					const float *src = buses ? buses[bus] : nullptr;
+					m_fx_stage[size_t(i) * 2 + side] = s16(std::lround(
+						std::clamp(src ? src[at + i] : 0.0f, -1.0f, 1.0f) * 32767.0f));
+				}
+			m_fx_rs[pair].push(m_fx_stage.data(), k);
+		}
+		at += k;
+		int available = m_fx_rs[0].output_available();
+		for (int pair = 1; pair != 5; pair++)
+			available = std::min(available, m_fx_rs[pair].output_available());
+		if (available <= 0)
+			continue;
+		for (int pair = 0; pair != 5; pair++) {
+			m_fx_conv[pair].resize(size_t(available) * 2);
+			m_fx_rs[pair].pull(m_fx_conv[pair].data(), available);
+		}
+		for (int i = 0; i != available; i++) {
+			const int next = (m_fx_w + 1) & IN_MASK;
+			if (next == m_fx_r)
+				break;
+			for (int pair = 0; pair != 5; pair++)
+				for (int side = 0; side != 2; side++)
+					m_fx_q[m_fx_w * 10 + pair * 2 + side] =
+						m_fx_conv[pair][size_t(i) * 2 + side];
+			m_fx_w = next;
+		}
+	}
+}
+
 // Holds what pump_out() hands over. On overflow the oldest byte goes
 void engine::tx_push(uint8_t v)
 {
@@ -639,7 +705,8 @@ size_t engine::midi_out(uint8_t *dst, size_t max)
 	return n;
 }
 
-void engine::fill(float *left, float *right, int n, const float *in_l, const float *in_r)
+void engine::fill(float *left, float *right, int n, const float *in_l, const float *in_r,
+                  const float *const *fx_buses)
 {
 	if (n <= 0)
 		return;
@@ -655,6 +722,8 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 		return;
 	}
 	push_input(in_l, in_r, n);
+	if (!m_direct)
+		push_fx_buses(fx_buses, n);
 	apply_deferred_state();
 	// **口の入切はここで**（gui.exe の ui/engine.h と同じ場所）
 	if (const int want = m_want_native.exchange(-1); want >= 0) {
@@ -681,7 +750,7 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 
 	if (m_direct) {
 		for (int i = 0; i < n; i++)
-			one_sample(left[i], right[i]);
+			one_sample(left[i], right[i], fx_buses, i);
 		m_drv.pump_out(*m_mu, m_bridge, [this](u8 v) { tx_push(v); });
 		m_drv.publish(*m_mu, m_bridge, u32(n), u32(NATIVE_RATE), true, nullptr);
 		publish_load(cpu_t0, n, double(NATIVE_RATE));

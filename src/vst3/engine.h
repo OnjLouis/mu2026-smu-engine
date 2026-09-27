@@ -136,7 +136,8 @@ public:
 
 	// n サンプルぶん作る。左右は別々の配列（VST3 はそういう渡し方をする）。
 	// in_l / in_r はホストの周波数で n サンプルぶんの A/D INPUT（無ければ nullptr）
-	void fill(float *left, float *right, int n, const float *in_l = nullptr, const float *in_r = nullptr);
+	void fill(float *left, float *right, int n, const float *in_l = nullptr, const float *in_r = nullptr,
+	          const float *const *fx_buses = nullptr);
 
 	// パネルの画面と触れ合う口。ボタンは画面から、LCD の写しはこちらから
 	ui::bridge &panel() { return m_bridge; }
@@ -247,7 +248,7 @@ private:
 	bool m_load_state_noted = false;
 	// 機械まるごとの状態を戻す。読めなければ XG の値の控えを流す（m_machine を持って呼ぶ）
 	bool restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup);
-	void one_sample(float &l, float &r);
+	void one_sample(float &l, float &r, const float *const *fx_buses = nullptr, int frame = 0);
 	void build_table();
 
 	std::atomic<status> m_state{status::loading};
@@ -292,12 +293,18 @@ private:
 
 	// ---- A/D INPUT。ホストの周波数で来る音を 44100 に直して溜め、音源が 1 サンプル進むごとに 1 つ使う
 	ui::resampler m_in_rs;
+	std::array<ui::resampler, 5> m_fx_rs;
 	static constexpr int IN_RING = 8192, IN_MASK = IN_RING - 1;
 	s16     m_in_q[IN_RING * 2] = {};
 	int     m_in_w = 0, m_in_r = 0;
 	std::vector<s16> m_in_stage;
 	std::vector<float> m_in_conv;
 	void push_input(const float *in_l, const float *in_r, int n);
+	float   m_fx_q[IN_RING * 10] = {};
+	int     m_fx_w = 0, m_fx_r = 0;
+	std::vector<s16> m_fx_stage;
+	std::array<std::vector<float>, 5> m_fx_conv;
+	void push_fx_buses(const float *const *buses, int n);
 
 	ui::bridge m_bridge;
 	// 口の入切（-1 は「頑みが無い」）と、いまの口

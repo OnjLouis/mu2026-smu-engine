@@ -3167,6 +3167,14 @@ void mu2000::native_fx_update()
 	}
 }
 
+void mu2000::set_external_fx_buses(const std::array<float, 10> &buses)
+{
+	std::array<s32, 10> scaled{};
+	for(int i = 0; i != 10; i++)
+		scaled[i] = s32(std::lround(std::clamp(buses[i], -1.0f, 1.0f) * DAC_FULL_SCALE));
+	m_swpm.set_external_fx_buses(scaled);
+}
+
 void mu2000::run_sample(s32 &left, s32 &right)
 {
 	// S-MU2000: 軽量モードでは、XG の設定をときどき読み直す

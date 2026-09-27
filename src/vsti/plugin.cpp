@@ -57,7 +57,7 @@ public:
 		m_effect.get_parameter = get_parameter_thunk;
 		m_effect.num_programs = 1;
 		m_effect.num_params = 1;
-		m_effect.num_inputs = 0;
+		m_effect.num_inputs = 10;
 		m_effect.num_outputs = 2;
 		m_effect.flags = has_editor | can_replacing | program_chunks | is_synth;
 		m_effect.object = this;
@@ -341,7 +341,7 @@ private:
 		return m_engine.load_state(raw.data(), raw.size()) ? 1 : 0;
 	}
 
-	void process(float **, float **outputs, vint32 frames)
+	void process(float **inputs, float **outputs, vint32 frames)
 	{
 		if (frames <= 0)
 			return;
@@ -380,14 +380,22 @@ private:
 		vint32 done = 0;
 		for (const queued_event &e : m_events) {
 			const vint32 at = std::clamp(e.offset, done, frames);
-			if (at > done)
-				m_engine.fill(left + done, right + done, at - done);
+			if (at > done) {
+				const float *buses[10] = {};
+				for (int i = 0; i != 10; i++)
+					buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
+				m_engine.fill(left + done, right + done, at - done, nullptr, nullptr, buses);
+			}
 			m_engine.midi(e.bytes.data(), e.bytes.size());
 			done = at;
 		}
 		m_events.clear();
-		if (done < frames)
-			m_engine.fill(left + done, right + done, frames - done);
+		if (done < frames) {
+			const float *buses[10] = {};
+			for (int i = 0; i != 10; i++)
+				buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
+			m_engine.fill(left + done, right + done, frames - done, nullptr, nullptr, buses);
+		}
 
 		const float target = m_engine.panel().gain();
 		if (target != m_gain_now || target != 1.0f) {
