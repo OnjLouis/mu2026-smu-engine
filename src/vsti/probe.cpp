@@ -35,13 +35,13 @@ bool finite_audio(const std::vector<float> &v)
 
 bool probe_hybrid_fx(effect *fx, double sample_rate)
 {
-	if (fx->num_inputs != 10) {
-		std::fprintf(stderr, "hybrid FX requires ten input buses, got %d\n", fx->num_inputs);
+	if (fx->num_inputs != 12) {
+		std::fprintf(stderr, "hybrid FX requires twelve input buses, got %d\n", fx->num_inputs);
 		return false;
 	}
 	constexpr int block = 256;
 	std::vector<float> silence(block), signal(block), left(block), right(block);
-	float *inputs[10] = {};
+	float *inputs[12] = {};
 	float *outputs[2] = { left.data(), right.data() };
 	for (float *&input : inputs)
 		input = silence.data();
@@ -89,6 +89,26 @@ bool probe_hybrid_fx(effect *fx, double sample_rate)
 	for (int i = 0; i < 100; i++)
 		fx->process_replacing(fx, inputs, outputs, block);
 	const auto insertion = measure(8);
+	char insertion2_type[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
+	                           0x01, 0x00, 0x49, 0x00, char(0xf7) };
+	char insertion2_part[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
+	                           0x01, 0x0c, 0x00, char(0xf7) };
+	ins_type_event.dump = insertion2_type;
+	ins_part_event.dump = insertion2_part;
+	fx->dispatcher(fx, eff_process_events, 0, 0, &insertion_setup, 0);
+	for (int i = 0; i < 100; i++)
+		fx->process_replacing(fx, inputs, outputs, block);
+	const auto insertion2 = measure(10);
+	char insertion2_thru[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
+	                           0x01, 0x00, 0x00, 0x00, char(0xf7) };
+	ins_type_event.dump = insertion2_thru;
+	struct { vint32 count; vintptr reserved; event *items[1]; } bypass_setup{};
+	bypass_setup.count = 1;
+	bypass_setup.items[0] = reinterpret_cast<event *>(&ins_type_event);
+	fx->dispatcher(fx, eff_process_events, 0, 0, &bypass_setup, 0);
+	for (int i = 0; i < 100; i++)
+		fx->process_replacing(fx, inputs, outputs, block);
+	const auto insertion2_through = measure(10);
 	char variation_type[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02, 0x01,
 	                          0x40, 0x05, 0x00, char(0xf7) };
 	char variation_system[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02,
@@ -110,12 +130,17 @@ bool probe_hybrid_fx(effect *fx, double sample_rate)
 	const auto variation = measure(6);
 	std::printf("hybrid buses: dry %.8g / %.8g, reverb %.8g / %.8g, "
 	            "chorus %.8g / %.8g, insertion %.8g / %.8g, "
+	            "insertion2 %.8g / %.8g, bypass %.8g / %.8g, "
 	            "variation %.8g / %.8g (early/tail)\n",
 	            dry.first, dry.second, reverb.first, reverb.second,
 	            chorus.first, chorus.second, insertion.first, insertion.second,
+	            insertion2.first, insertion2.second,
+	            insertion2_through.first, insertion2_through.second,
 	            variation.first, variation.second);
 	return dry.first > 1e-5 && reverb.second > 1e-4
 		&& chorus.second > 1e-4 && insertion.first > 1e-3
+		&& insertion2.first > 1e-3
+		&& std::abs(insertion2.first - insertion2_through.first) > 1e-3
 		&& variation.second > 1e-4;
 }
 

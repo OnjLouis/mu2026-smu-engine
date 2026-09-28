@@ -3167,12 +3167,21 @@ void mu2000::native_fx_update()
 	}
 }
 
-void mu2000::set_external_fx_buses(const std::array<float, 10> &buses)
+void mu2000::set_external_fx_buses(const std::array<float, EXTERNAL_FX_BUS_COUNT> &buses)
 {
-	std::array<s32, 10> scaled{};
-	for(int i = 0; i != 10; i++)
-		scaled[i] = s32(std::lround(std::clamp(buses[i], -1.0f, 1.0f) * DAC_FULL_SCALE));
-	m_swpm.set_external_fx_buses(scaled);
+	std::array<s32, 10> master{};
+	std::array<s32, 10> slave{};
+	// External sources can exceed unity before MEG attenuation; keep that headroom.
+	for(int i = 0; i != EXTERNAL_FX_BUS_COUNT; i++) {
+		const float sample = std::isfinite(buses[i]) ? buses[i] : 0.0f;
+		const s32 scaled = s32(std::lround(std::clamp(sample, -8.0f, 8.0f) * DAC_FULL_SCALE));
+		if (i < 10)
+			master[i] = scaled;
+		else
+			slave[8 + i - 10] = scaled;
+	}
+	m_swpm.set_external_fx_buses(master);
+	m_swps.set_external_fx_buses(slave);
 }
 
 void mu2000::run_sample(s32 &left, s32 &right)

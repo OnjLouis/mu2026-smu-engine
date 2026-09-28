@@ -57,7 +57,7 @@ public:
 		m_effect.get_parameter = get_parameter_thunk;
 		m_effect.num_programs = 1;
 		m_effect.num_params = 1;
-		m_effect.num_inputs = 10;
+		m_effect.num_inputs = 12;
 		m_effect.num_outputs = 2;
 		m_effect.flags = has_editor | can_replacing | program_chunks | is_synth;
 		m_effect.object = this;
@@ -75,6 +75,7 @@ public:
 	}
 
 	effect *interface() { return &m_effect; }
+	void set_native_engine(int mode) { m_engine.request_native_engine(mode); }
 
 private:
 	struct queued_event {
@@ -381,8 +382,8 @@ private:
 		for (const queued_event &e : m_events) {
 			const vint32 at = std::clamp(e.offset, done, frames);
 			if (at > done) {
-				const float *buses[10] = {};
-				for (int i = 0; i != 10; i++)
+				const float *buses[12] = {};
+				for (int i = 0; i != 12; i++)
 					buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
 				m_engine.fill(left + done, right + done, at - done, nullptr, nullptr, buses);
 			}
@@ -391,8 +392,8 @@ private:
 		}
 		m_events.clear();
 		if (done < frames) {
-			const float *buses[10] = {};
-			for (int i = 0; i != 10; i++)
+			const float *buses[12] = {};
+			for (int i = 0; i != 12; i++)
 				buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
 			m_engine.fill(left + done, right + done, frames - done, nullptr, nullptr, buses);
 		}
@@ -433,6 +434,15 @@ effect *create_plugin(host_callback host)
 	return (new plugin(host))->interface();
 }
 
+bool set_native_engine(effect *instance, int mode)
+{
+	if (!instance || instance->magic != effect_magic || !instance->object
+	    || (mode != 0 && mode != 1))
+		return false;
+	static_cast<plugin *>(instance->object)->set_native_engine(mode);
+	return true;
+}
+
 } // namespace smu2000::vsti
 
 extern "C" __declspec(dllexport) smu2000::vsti::effect *SMU_VSTCALLBACK
@@ -445,4 +455,10 @@ VSTPluginMain(smu2000::vsti::host_callback host)
 	} catch (...) {
 		return nullptr;
 	}
+}
+
+extern "C" __declspec(dllexport) bool SMU_VSTCALLBACK
+Mu2026SetNativeEngine(smu2000::vsti::effect *instance, int mode)
+{
+	return smu2000::vsti::set_native_engine(instance, mode);
 }

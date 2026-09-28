@@ -538,15 +538,15 @@ void engine::flush_resampler()
 void engine::one_sample(float &l, float &r, const float *const *fx_buses, int frame)
 {
 	s32 li = 0, ri = 0;
-	std::array<float, 10> buses{};
+	std::array<float, mu2000::EXTERNAL_FX_BUS_COUNT> buses{};
 	if (fx_buses)
-		for (int i = 0; i != 10; i++)
+		for (int i = 0; i != mu2000::EXTERNAL_FX_BUS_COUNT; i++)
 			buses[i] = fx_buses[i] ? fx_buses[i][frame] : 0.0f;
 	if (!m_direct) {
 		buses.fill(0.0f);
 		if (m_fx_r != m_fx_w) {
-			for (int i = 0; i != 10; i++)
-				buses[i] = m_fx_q[m_fx_r * 10 + i];
+			for (int i = 0; i != mu2000::EXTERNAL_FX_BUS_COUNT; i++)
+				buses[i] = m_fx_q[m_fx_r * mu2000::EXTERNAL_FX_BUS_COUNT + i];
 			m_fx_r = (m_fx_r + 1) & IN_MASK;
 		}
 	}
@@ -649,7 +649,7 @@ void engine::push_fx_buses(const float *const *buses, int n)
 		return;
 	for (int at = 0; at < n;) {
 		const int k = std::min(1024, n - at);
-		for (int pair = 0; pair != 5; pair++) {
+		for (int pair = 0; pair != 6; pair++) {
 			m_fx_stage.resize(size_t(k) * 2);
 			for (int i = 0; i != k; i++)
 				for (int side = 0; side != 2; side++) {
@@ -662,11 +662,11 @@ void engine::push_fx_buses(const float *const *buses, int n)
 		}
 		at += k;
 		int available = m_fx_rs[0].output_available();
-		for (int pair = 1; pair != 5; pair++)
+		for (int pair = 1; pair != 6; pair++)
 			available = std::min(available, m_fx_rs[pair].output_available());
 		if (available <= 0)
 			continue;
-		for (int pair = 0; pair != 5; pair++) {
+		for (int pair = 0; pair != 6; pair++) {
 			m_fx_conv[pair].resize(size_t(available) * 2);
 			m_fx_rs[pair].pull(m_fx_conv[pair].data(), available);
 		}
@@ -674,9 +674,9 @@ void engine::push_fx_buses(const float *const *buses, int n)
 			const int next = (m_fx_w + 1) & IN_MASK;
 			if (next == m_fx_r)
 				break;
-			for (int pair = 0; pair != 5; pair++)
+			for (int pair = 0; pair != 6; pair++)
 				for (int side = 0; side != 2; side++)
-					m_fx_q[m_fx_w * 10 + pair * 2 + side] =
+					m_fx_q[m_fx_w * mu2000::EXTERNAL_FX_BUS_COUNT + pair * 2 + side] =
 						m_fx_conv[pair][size_t(i) * 2 + side];
 			m_fx_w = next;
 		}
