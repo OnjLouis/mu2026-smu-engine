@@ -11,6 +11,47 @@
 
 namespace smf {
 
+int port_from_track_name(const std::string &raw)
+{
+	std::string s;
+	for (char c : raw)
+		if (c != 0)
+			s += char(std::tolower(u8(c)));
+	while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+		s.pop_back();
+	size_t i = 0;
+	while (i < s.size() && s[i] == ' ')
+		i++;
+	auto sep = [&]() { while (i < s.size() && (s[i] == ' ' || s[i] == '-' || s[i] == '_')) i++; };
+	bool part = false;
+	if (s.compare(i, 4, "part") == 0) {
+		part = true;
+		i += 4;
+		sep();
+	}
+	if (i >= s.size() || s[i] < 'a' || s[i] > 'd')
+		return -1;
+	const int port = s[i++] - 'a';
+	sep();
+	// 後ろは空（Part の形だけ）か、1-16 の番号
+	if (i == s.size())
+		return part ? port : -1;
+	int n = 0, digits = 0;
+	while (i < s.size() && s[i] >= '0' && s[i] <= '9' && digits < 3) {
+		n = n * 10 + (s[i++] - '0');
+		digits++;
+	}
+	if (!digits || n < 1 || n > 16)
+		return -1;
+	if (i == s.size())
+		return port;
+	// 番号の後ろに音色名などが続く形（「A01-FrHorn 2」「B10 Shroud」）は、**2 桁の番号**と区切りが
+	// あるときだけ読む（「B3 Organ」のような楽器名と紛れないように）
+	if (digits == 2 && (s[i] == '-' || s[i] == ' ' || s[i] == '_' || s[i] == ':'))
+		return port;
+	return -1;
+}
+
 namespace {
 u32 be32(const u8 *p) { return (u32(p[0]) << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 u16 be16(const u8 *p) { return u16((p[0] << 8) | p[1]); }
@@ -51,8 +92,10 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 		u64 tick = 0;
 		u8  running = 0;
 		// トラックごとの出し先。`FF 21 01 pp` で決まる。無ければ 0。
-		// 昔の `FF 04`（機器名）でポートを言う流儀もあるが、そちらは見ない
+		// 昔の `FF 04`（機器名）でポートを言う流儀もあるが、そちらは見ない。
+		// ポート指定・機器名が無いトラックは、トラック名（`FF 03`）で決める（issue #63）
 		u8  port = 0;
+		bool explicit_port = false;
 		while (p < end) {
 			u64 delta = 0;                       // 可変長
 			while (p < end) {
@@ -73,17 +116,33 @@ bool load(const std::string &path, std::vector<event> &out, std::string &err)
 				if (type == 0x51 && l == 3)
 					all.push_back({ tick, {}, true,
 					                (u32(d[p]) << 16) | (d[p+1] << 8) | d[p+2], 0 });
-				if (type == 0x21 && l == 1)
+				if (type == 0x21 && l == 1) {
 					port = d[p];
+					explicit_port = true;
+				}
+				// **ヤマハのシーケンサー固有のポート指定**（`FF 7F 04 43 00 01 pp`。pp は 0 始まり）。
+				// ヤマハの MU128 などの 3〜4 口の曲がこれで口を言う（issue #63 の 05FINALE）
+				if (type == 0x7f && l == 4 && p + 4 <= end && d[p] == 0x43 && d[p + 1] == 0x00 && d[p + 2] == 0x01) {
+					port = d[p + 3];
+					explicit_port = true;
+				}
+				if (type == 0x03 && !explicit_port && l >= 1 && l <= 64) {
+					const int tp = port_from_track_name(std::string(d.begin() + p, d.begin() + std::min(p + size_t(l), end)));
+					if (tp >= 0)
+						port = u8(tp);
+				}
 				if (type == 0x09 && l >= 1 && l <= 32) {
 					// 機器名で口を言う流儀。「A」〜「D」か「Port 1」〜「Port 4」（大文字小文字は問わない）だけ見る
 					std::string name(d.begin() + p, d.begin() + std::min(p + size_t(l), end));
 					while (!name.empty() && (name.back() == ' ' || name.back() == 0)) name.pop_back();
 					for (char &c : name) c = char(std::tolower(u8(c)));
-					if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'd')
+					if (name.size() == 1 && name[0] >= 'a' && name[0] <= 'd') {
 						port = u8(name[0] - 'a');
-					else if (name.size() == 6 && name.compare(0, 5, "port ") == 0 && name[5] >= '1' && name[5] <= '4')
+						explicit_port = true;
+					} else if (name.size() == 6 && name.compare(0, 5, "port ") == 0 && name[5] >= '1' && name[5] <= '4') {
 						port = u8(name[5] - '1');
+						explicit_port = true;
+					}
 				}
 				p += size_t(l);
 				continue;

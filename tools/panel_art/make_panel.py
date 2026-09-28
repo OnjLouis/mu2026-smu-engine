@@ -796,6 +796,62 @@ def part_key(down):
     return d, (-NAV_W / 2, -NAV_H / 2, NAV_W, NAV_H)
 
 
+# キートップの印刷（panel.cpp の draw_key_print と同じ置き方）。長さは論理単位で書いて
+# 写真の画素に直す。字は Arial Bold で 9 単位、記号は半径 4.2 単位の丸に白抜き
+KEY_PRINT = {
+    "mute_solo": ("MUTE/", "SOLO"), "part-": ("PART", "-"), "part+": ("PART", "+"),
+    "enter": ("ENTER", ""), "select-": ("SELECT", "<"), "select+": ("SELECT", ">"),
+    "exit": ("EXIT", ""), "value-": ("VALUE", "-"), "value+": ("VALUE", "+"),
+}
+KEY_INK = "#3e3c36"
+KEY_WHITE = "#eceae2"
+
+
+def key_print(d, name, down):
+    u = 1.0 / S                                   # 論理 1 単位 = 写真の画素
+    em = 9.0 * u
+    top, h = -NAV_H / 2, NAV_H
+    dy = (1.0 * u) if down else 0.0
+    label, sub = KEY_PRINT[name]
+
+    def line(txt, f):
+        # 大文字の見える部分の真ん中を f の高さへ（Arial の大文字の高さ 0.716 em）
+        base = top + h * f + dy + 0.716 * em / 2
+        d.text(0, round(base, 2), txt, size=round(em, 2), weight="bold", family="Arial", fill=KEY_INK)
+
+    if sub == "SOLO":
+        line(label, 0.33)
+        line(sub, 0.61)
+        return
+    if not sub:
+        line(label, 0.49)
+        return
+    line(label, 0.33)
+    cy = top + h * 0.61 + dy
+    r = 4.2 * u
+    a, t = 0.6 * r, 0.14 * r
+    d.add(f'<circle cx="0" cy="{cy:.2f}" r="{r:.2f}" fill="{KEY_INK}"/>')
+    if sub in "+-":
+        d.add(f'<rect x="{-a:.2f}" y="{cy - t:.2f}" width="{2 * a:.2f}" height="{2 * t:.2f}" fill="{KEY_WHITE}"/>')
+        if sub == "+":
+            d.add(f'<rect x="{-t:.2f}" y="{cy - a:.2f}" width="{2 * t:.2f}" height="{2 * a:.2f}" fill="{KEY_WHITE}"/>')
+    else:
+        s = 1 if sub == ">" else -1
+        pts = [(s * a, cy), (-s * a / 2, cy - a), (-s * a / 2, cy + a)]
+        d.add('<polygon points="' + " ".join(f"{x:.2f},{y:.2f}" for x, y in pts) + f'" fill="{KEY_WHITE}"/>')
+
+
+def part_key_face(name, down):
+    d, vb = part_key(down)
+    key_print(d, name, down)
+    return d, vb
+
+
+def key_file(name, down):
+    base = name.replace("-", "_minus").replace("+", "_plus")
+    return f"key-{base}{'-down' if down else ''}.png"
+
+
 def hard_disc(d, r, face, light, dark, cy=0.0, glint=True):
     """A hard round cap: flat face, crisp light rim at the top-left and a dark
     one at the bottom-right, a small sharp glint."""
@@ -880,6 +936,10 @@ PARTS = {
     "plg.png": lambda: part_plg(False), "plg-on.png": lambda: part_plg(True),
     "knob.png": part_knob, "dial.png": part_dial,
 }
+# キーごとの絵（印刷入り）。panel.txt の nav.face で貼る
+for _name in KEY_PRINT:
+    for _down in (False, True):
+        PARTS[key_file(_name, _down)] = (lambda n=_name, dn=_down: part_key_face(n, dn))
 
 
 # ---------------------------------------------------------------- panel.txt
@@ -922,6 +982,8 @@ def panel_txt():
     L.append('mode.art  "btn.png" "btn-on.png" "btn-down.png"')
     L.append('mode.on sampling "btn-on-red.png"')
     L.append('nav.art   "key.png" "key-down.png"')
+    for name in KEY_PRINT:
+        L.append(f'nav.face {name:<10} "{key_file(name, False)}" "{key_file(name, True)}"')
     L.append('cat.art   "cat.png" "cat-down.png"')
     L.append('round.art "rnd.png" "rnd-down.png"')
     L.append('plg.art   "plg.png" "plg-on.png"')

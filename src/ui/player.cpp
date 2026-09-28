@@ -86,14 +86,16 @@ void player::run(bridge &br)
 		    std::chrono::steady_clock::now() - t0).count();
 		m_pos.store(sec, std::memory_order_relaxed);
 
-		// 来ている分をまとめて送る。トラックの出し先（SMF のポート指定）が 0 なら口 A、1 なら口 B。
-		// エミュは A・B の 2 口しか持たない（実機の C・D は未対応）ので、口 3・4 は選んだ扱いに従う（A・B に重ねるか、鳴らさない）
+		// 来ている分をまとめて送る。トラックの出し先（SMF のポート指定かトラック名）が 0-3 なら口 A-D。
+		// USB の口（gui の既定）なら 4 口ともそのまま。DIN の口だけ（--host-midi）なら、口 3・4 は
+		// 選んだ扱いに従う（A・B に重ねるか、鳴らさない）
 		const bool fold = m_fold.load(std::memory_order_relaxed);
+		const bool usb = m_usb.load(std::memory_order_relaxed);
 		while (at < m_events.size() && m_events[at].time <= sec) {
 			const smf::event &e = m_events[at];
-			const int to = smf::mu_port(e.port, fold);
-			if (to == 1)      br.send_b(e.bytes.data(), e.bytes.size());
-			else if (to == 0) br.send(e.bytes.data(), e.bytes.size());
+			const int to = smf::mu_port(e.port, fold, usb);
+			if (to == 0)      br.send(e.bytes.data(), e.bytes.size());
+			else if (to > 0)  br.send_port(to, e.bytes.data(), e.bytes.size());
 			at++;
 		}
 		if (at >= m_events.size())

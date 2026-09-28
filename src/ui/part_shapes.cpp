@@ -99,12 +99,18 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 	}
 	const bool knobs = index != PANEL_FIXED && (index < 0 || shapes_knobs(index));
 	bool toggle_hovered = false;
+	const float title_top = ImGui::GetCursorScreenPos().y;
 	ImGui::PushFont(nullptr, fs * 0.8f);      // 見出しは小さめに
 	if (index < 0)
 		ImGui::TextUnformatted(title);
 	else if (title_toggle(title, "##mode", knobs, toggle_hovered))
 		set_shapes_knobs(index, !knobs);
 	ImGui::PopFont();
+	// 見出しの行の上か（Ctrl＋右クリックで区画ごと送るのは見出しだけ）
+	const float title_bottom = ImGui::GetCursorScreenPos().y;
+	const float my = ImGui::GetIO().MousePos.y;
+	const bool over_title = !toggle_hovered && my >= title_top && my < title_bottom &&
+	                        ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 	const std::string before = hint_text();
 	if (!knobs) {
 		// 絵だけ。区画の残りを全部使う
@@ -116,6 +122,9 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 			param_slider(k, part, m, br);
 		ImGui::PopItemWidth();
 	}
+	// 見出しの上なら、Ctrl＋右クリックで区画のパラメータをまとめて送る
+	if (keys.size() && over_title)
+		out_hover_group(std::vector<const char *>(keys.begin(), keys.end()), part);
 	// カーソルの下の部品が説明を出さなかったら、区画そのものの説明を
 	if (about && !toggle_hovered && hint_text() == before &&
 	    ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
@@ -200,6 +209,15 @@ void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
 		const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
 		dl->AddText(ImVec2(org.x + fs * 0.3f, y + (ch - gap - ls.y) * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), label.c_str());
 		if (row_hover) {
+			// Ctrl＋右クリック: AC1・AC2 の見出しは CC の番号、ほかの見出しはその行の 6 マス
+			if (r >= 4) {
+				out_hover_param(P((std::string("part.") + SRCS[r].key + "_cc").c_str()), part);
+			} else {
+				std::vector<const char *> row_keys;
+				for (int c = 0; c < 6; c++)
+					row_keys.push_back(P((std::string("part.") + SRCS[r].key + "_" + DSTS[c].key).c_str()).key);
+				out_hover_group(row_keys, part);
+			}
 			if (r >= 4)
 				hint(UI_TEXT(mx_hint_cc_fmt, "%s\n%s. The 6 cells in this row are what this source moves. Wheel over a header changes the CC number"),
 				     official_name((std::string("part.") + SRCS[r].key + "_cc").c_str()).c_str(), SRCS[r].about);
@@ -264,6 +282,8 @@ void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
 			dl->AddText(ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f),
 			            ImGui::GetColorU32(known && ((bip && v != p.center) || (!bip && v != p.min)) ? ImGuiCol_Text : ImGuiCol_TextDisabled),
 			            text.c_str());
+			if (hov && known)
+				out_hover_param(p, part);          // Ctrl＋右クリックでこのマスを送る
 			if (hov || act) {
 				const char *help = help_for(key.c_str());
 				char to[64];
@@ -647,11 +667,15 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		if (part_sw.first)
 			br.send(m.set(P("variation.part"), 0, var_part == part ? 127 : part));
 		if (part_sw.second)
+			out_hover_param(P("variation.part"), 0);
+		if (part_sw.second)
 			hint(UI_TEXT(ps_var_part_hint, "%s\nOn puts the variation on this part (off: on no part). Only applies in insertion (INS) connection; with both INS and PART on, type and parameters are editable here"),
 			     official_name("variation.part").c_str());
 		const auto ins_sw = toggle("##vins", "INS", !var_sys, true);
 		if (ins_sw.first)
 			br.send(m.set(P("variation.connect"), 0, var_sys ? 0 : 1));
+		if (ins_sw.second)
+			out_hover_param(P("variation.connect"), 0);
 		if (ins_sw.second)
 			hint(UI_TEXT(ps_var_ins_hint, "%s\nOn: insertion connection (whole sound of the played part passes through, splitting into dry plus reverb/chorus sends); off: system connection (collects all parts' Var Send, mixes at return). Only one variation exists, shared with other parts. While INS and PART are not both on, only this part's Send is editable here"),
 			     official_name("variation.connect").c_str());
@@ -698,6 +722,8 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		}
 		ImGui::EndCombo();
 	}
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		out_hover_param(ptype, 0);               // Ctrl＋右クリックで種類を送る
 	if (ImGui::IsItemHovered()) {
 		const char *th = type >= 0 ? fx_type_help(msb, type & 0x7f) : nullptr;
 		hint("%s  %s\n%s", official_name((prefix + ".type").c_str()).c_str(), name.c_str(), th ? th : UI_TEXT(ps_fx_type_fallback, "Effect type"));
@@ -729,7 +755,8 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		ImGui::EndDisabled();
 		if (idle)
 			ImGui::PopStyleColor(3);
-		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && known)
+			out_hover_param(ps, part);
 		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
 			hint(idle ? UI_TEXT(ps_var_send_idle_fmt, "%s  %d (ineffective)\nVariation is insertion-connected, so part sends do nothing. Values stay movable; switching back to system connection (INS off) sends at this value")
 			              : UI_TEXT(ps_var_send_hint, "%s  %d\nThis part's send to variation (works in system connection). Drag to change"), official_name("part.variation_send").c_str(), sv);
@@ -790,6 +817,8 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			const std::string text = known ? xg::format(*it.mp, v) : std::string("--");
 			if (fx_editor::knob(id, v, it.mp->min, it.mp->max, ksize, it.label, text.c_str(), false, it.lock) && known)
 				drag_send(br, m.set(*it.mp, pp, v));
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && known)
+				out_hover_param(*it.mp, pp);          // Ctrl＋右クリックで送る
 			if (it.lock && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 				hint(UI_TEXT(ps_fx_viewonly_fmt, "%s  %s\nNot this part's insertion, so view-only here (turn on INS and PART above to edit)"),
 				     official_name(it.mp->key).c_str(), text.c_str());
@@ -808,6 +837,8 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			const std::string text = known ? fx_value_text(*it.fp, v) : std::string("--");
 			if (fx_editor::knob(id, v, it.fp->lo, it.fp->hi, ksize, it.fp->label, text.c_str(), false, it.lock) && known)
 				drag_send(br, m.set_raw(addr, size, v));
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && known)
+				out_hover_raw(addr, size, it.fp->label);   // Ctrl＋右クリックで送る
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive())
 				focus_fp = it.fp;
 			if (it.lock && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -1185,12 +1216,48 @@ void drum_release(bridge &br)
 	g_drum_held = -1;
 }
 
+// パートモード（08 pp 07）の選択。NORMAL / DRUM / DRUMS1-4。ここで DRUMS の組を付け替える。
+// 同じ組を使っているほかのパートがあれば、カーソルを載せると並べる
+void part_mode_combo(int part, xg::model &m, const xg_snapshot &ram, bridge &br)
+{
+	const xg::param &pm = P("part.mode");
+	int mode = ram.parts[part][0x07];
+	m.get(pm, part, mode);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted("Part Mode");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.5f);
+	if (ImGui::BeginCombo("##pmode", xg::format(pm, mode).c_str())) {
+		for (int v = pm.min; v <= pm.max; v++) {
+			std::string label = xg::format(pm, v);
+			// ほかに同じ組を使っているパート
+			if (v >= 2) {
+				std::string users;
+				for (int p = 0; p < XG_PARTS; p++)
+					if (p != part && ram.parts[p][0x07] == v)
+						users += (users.empty() ? "" : ", ") + part_name(p);
+				if (!users.empty())
+					label += "  (" + users + ")";
+			}
+			if (ImGui::Selectable(label.c_str(), v == mode) && v != mode)
+				br.send(m.set(pm, part, v));
+		}
+		ImGui::EndCombo();
+	}
+	if (ImGui::IsItemHovered())
+		out_hover_param(pm, part);           // Ctrl＋右クリックでパートモードを送る
+	if (ImGui::IsItemHovered())
+		hint("Part Mode  %s\n%s", xg::format(pm, mode).c_str(),
+		     UI_TEXT(ps_drum_mode_hint, "Which drum setup (DRUMS1-4) this part uses. DRUM (no number) takes no setup. Changing the kit resets the setup it uses"));
+}
+
 void drum_tab(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float room_h)
 {
 	const float fs = ImGui::GetFontSize();
 	const ImGuiStyle &st = ImGui::GetStyle();
 	const int set = drum_set_of(ram, part);
 	if (set < 0) {
+		part_mode_combo(part, m, ram, br);
 		ImGui::Spacing();
 		ImGui::TextWrapped("%s", ram.parts[part][0x07] == 1
 		                             ? UI_TEXT(ps_drum_plain, "Part mode DRUM (no number) ignores every drum setup. Set it to DRUMS1-4 to edit its keys here")
@@ -1214,8 +1281,10 @@ void drum_tab(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float 
 		g_drum_prev[0] = now[0];
 		g_drum_prev[1] = now[1];
 	}
+	part_mode_combo(part, m, ram, br);
+	ImGui::SameLine();
 	ImGui::AlignTextToFramePadding();
-	ImGui::Text("DRUMS%d  %s", set + 1, drum_kit_name(m, part).c_str());
+	ImGui::TextUnformatted(drum_kit_name(m, part).c_str());
 	ImGui::SameLine();
 	// 鍵の名前は今のキットの楽器名（ROM の表）。音の無い鍵は番号だけ
 	auto key_label = [&](int k) {
@@ -1267,6 +1336,8 @@ void drum_tab(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float 
 		if (ImGui::DragInt("##alt", &alt, 0.2f, dp[3].lo, dp[3].hi, at.c_str(), ImGuiSliderFlags_AlwaysClamp))
 			drum_write(br, set, key, 3, alt);
 		if (ImGui::IsItemHovered())
+			out_hover_drum(set, key, 3);
+		if (ImGui::IsItemHovered())
 			hint("Alt  %s\n%s", drum_value_text(3, alt).c_str(), help_for("drum.Alt") ? help_for("drum.Alt") : "");
 		for (int i : { 8, 9, 10 }) {
 			ImGui::SameLine();
@@ -1275,6 +1346,7 @@ void drum_tab(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float 
 			if (ImGui::Checkbox(label.c_str(), &on))
 				drum_write(br, set, key, i, on ? 1 : 0);
 			if (ImGui::IsItemHovered()) {
+				out_hover_drum(set, key, i);
 				const std::string hk = std::string("drum.") + dp[i].head;
 				hint("%s  %s\n%s", dp[i].head, drum_value_text(i, on ? 1 : 0).c_str(), help_for(hk.c_str()) ? help_for(hk.c_str()) : "");
 			}
@@ -1318,6 +1390,7 @@ void part_shapes::drum_hidden(bridge &br)
 void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	set_current_ram(&ram);            // 絵が音色の中身を読むため（ピッチ EG など）
+	out_begin_frame();                // Ctrl＋右クリックで送るものは、部品がコマごとに名乗り直す
 	begin_hint_bar();                 // 絵や名前の説明は、マウスのそばでなく下の帯に出す
 	const ImGuiViewport *vp = ImGui::GetMainViewport();
 	ImGui::SetNextWindowPos(vp->WorkPos);
@@ -1372,7 +1445,11 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	}
 	ImGui::TextUnformatted(voice.c_str());
 
-	// 表示の大きさと、説明のチェックボックスは右端へ
+	// 送り先（Ctrl＋右クリックで送る先）、表示の大きさと、説明のチェックボックスは右端へ
+	if (out_ready()) {
+		ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - fs * 34);
+		out_port_combo();
+	}
 	ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - fs * 18);
 	if (ImGui::SmallButton("-"))
 		set_shapes_zoom(zoom - 0.1f);
@@ -1418,6 +1495,9 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 				drum_pane(part, m, br);
 			else
 				program_pane(part, m, &ram, br);
+			// 面の上なら、Ctrl＋右クリックで今の音色（バンクセレクトとプログラムチェンジ）を送る
+			if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows))
+				out_hover_program(part);
 			ImGui::PopFont();
 		}
 		ImGui::EndChild();
@@ -1613,6 +1693,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::EndChild();
 	}
 	end_hint_bar();
+	out_end_frame(m, ram, br);
 	br.want_scope(scope);
 
 	ImGui::PopFont();

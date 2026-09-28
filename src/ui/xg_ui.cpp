@@ -500,6 +500,242 @@ void drum_write(bridge &br, int set, int key, int idx, int value, bool drag)
 	                     g_drum_pending.end());
 }
 
+// ---- 外の MIDI 出力へ送る
+namespace {
+out_hooks g_out;
+bool g_out_set = false;
+enum class out_kind { none, param, drum, drum_row, program, group, live, raw };
+struct out_target {
+	out_kind k = out_kind::none;
+	const xg::param *p = nullptr;
+	int part = 0, set = 0, key = 0, idx = 0;
+	int slot = -1, value = 0;
+	bool bend = false;
+	u32 addr = 0;
+	int size = 0;
+	const char *label = nullptr;
+	std::vector<const char *> keys;
+};
+out_target g_hover;
+std::string g_out_note;
+double g_out_note_at = -100.0;
+}
+
+void set_out_hooks(out_hooks h)
+{
+	g_out = std::move(h);
+	g_out_set = true;
+}
+
+bool out_ready() { return g_out_set && g_out.dest && g_out.devices && g_out.choose; }
+
+void out_begin_frame() { g_hover = out_target{}; }
+
+void out_hover_param(const xg::param &p, int part)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::param;
+	g_hover.p = &p;
+	g_hover.part = part;
+}
+
+void out_hover_drum(int set, int key, int idx)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::drum;
+	g_hover.set = set;
+	g_hover.key = key;
+	g_hover.idx = idx;
+}
+
+void out_hover_drum_row(int set, int key)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::drum_row;
+	g_hover.set = set;
+	g_hover.key = key;
+}
+
+void out_hover_raw(u32 addr, int size, const char *label)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::raw;
+	g_hover.addr = addr;
+	g_hover.size = size;
+	g_hover.label = label;
+}
+
+void out_hover_program(int part)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::program;
+	g_hover.part = part;
+}
+
+void out_hover_live(int slot, bool bend, int value)
+{
+	g_hover = out_target{};
+	g_hover.k = out_kind::live;
+	g_hover.slot = slot;
+	g_hover.bend = bend;
+	g_hover.value = value;
+}
+
+void out_hover_group(const std::vector<const char *> &keys, int part)
+{
+	if (g_hover.k != out_kind::none || keys.empty())
+		return;
+	g_hover.k = out_kind::group;
+	g_hover.keys = keys;
+	g_hover.part = part;
+}
+
+void out_port_combo()
+{
+	if (!out_ready())
+		return;
+	const float fs = ImGui::GetFontSize();
+	const std::string cur = g_out.chosen ? g_out.chosen() : std::string();
+	const char *panel = UI_TEXT(ps_out_panel, "Panel ports");
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("%s", UI_TEXT(ps_out_label, "Send to"));
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(fs * 10.0f);
+	if (ImGui::BeginCombo("##sendout", cur.empty() ? panel : cur.c_str(), ImGuiComboFlags_HeightLarge)) {
+		std::string first = panel;
+		if (g_out.panel_desc)
+			first += "  (" + g_out.panel_desc() + ")";
+		if (ImGui::Selectable(first.c_str(), cur.empty()))
+			g_out.choose(-1);
+		ImGui::Separator();
+		const std::vector<std::string> names = g_out.devices();
+		for (size_t i = 0; i < names.size(); i++) {
+			ImGui::PushID(int(i));
+			if (ImGui::Selectable(names[i].c_str(), names[i] == cur))
+				g_out.choose(int(i));
+			ImGui::PopID();
+		}
+		ImGui::EndCombo();
+	}
+	if (ImGui::IsItemHovered())
+		hint("%s", UI_TEXT(ps_out_hint, "Where Ctrl+right-click sends\nCtrl+right-click a value, fader or key to send just that parameter (not to the sound engine) so a sequencer can record it. A section heading sends the whole section, the MW wheel sends CC1, the bend wheel sends pitch bend, a voice or kit row sends bank select and program change; in the editor's drum page, a cell sends that item and a key or name sends the whole key. Panel ports: parts on A go to THRU A, on B to THRU B"));
+	if (!g_out_note.empty() && ImGui::GetTime() - g_out_note_at < 4.0) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", g_out_note.c_str());
+	}
+}
+
+void out_end_frame(xg::model &m, const xg_snapshot &ram, bridge &br)
+{
+	if (!out_ready() || g_hover.k == out_kind::none)
+		return;
+	const ImGuiIO &io = ImGui::GetIO();
+	if (!io.KeyCtrl || !ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+		return;
+	std::vector<std::vector<u8>> msgs;
+	std::string what;
+	int port = 0;                          // SysEx はパート番号を含むので口 A で送る
+	auto add_param = [&](const xg::param &p, int part) {
+		int v = 0;
+		if (!m.get(p, part, v))
+			return;
+		msgs.push_back(m.set(p, part, v));
+		if (what.empty())
+			what = official_name(p.key) + " = " + value_text(p.key, v);
+	};
+	switch (g_hover.k) {
+	case out_kind::param:
+		add_param(*g_hover.p, g_hover.part);
+		if (g_hover.p->where == xg::area::part)
+			what = part_name(g_hover.part) + " " + what;
+		break;
+	case out_kind::group:
+		for (const char *key : g_hover.keys)
+			add_param(P(key), g_hover.part);
+		what = part_name(g_hover.part) + " " + what + " …";
+		break;
+	case out_kind::drum: {
+		const drum_param &d = drum_params()[g_hover.idx];
+		const int v = drum_value(ram, g_hover.set, g_hover.key, g_hover.idx);
+		msgs.push_back({ 0xf0, 0x43, 0x10, 0x4c, u8(0x30 + g_hover.set), u8(g_hover.key), d.addr, u8(v & 0x7f), 0xf7 });
+		char buf[96];
+		std::snprintf(buf, sizeof(buf), "DRUMS%d %s %s = %s", g_hover.set + 1, drum_key_text(g_hover.key).c_str(), d.head,
+		              drum_value_text(g_hover.idx, v).c_str());
+		what = buf;
+		break;
+	}
+	case out_kind::raw: {
+		int v = 0;
+		if (!m.get_raw(g_hover.addr, g_hover.size, v))
+			return;
+		msgs.push_back(m.set_raw(g_hover.addr, g_hover.size, v));
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "%s = %d", g_hover.label ? g_hover.label : "?", v);
+		what = buf;
+		break;
+	}
+	case out_kind::drum_row: {
+		for (int i = 0; i < XG_DRUM_PARAMS; i++) {
+			const int v = drum_value(ram, g_hover.set, g_hover.key, i);
+			msgs.push_back({ 0xf0, 0x43, 0x10, 0x4c, u8(0x30 + g_hover.set), u8(g_hover.key), drum_params()[i].addr,
+			                 u8(v & 0x7f), 0xf7 });
+		}
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "DRUMS%d %s", g_hover.set + 1, drum_key_text(g_hover.key).c_str());
+		what = buf;
+		break;
+	}
+	case out_kind::live: {
+		if (g_hover.slot < 0 || g_hover.slot > 63)
+			return;
+		const u8 ch = u8(g_hover.slot & 15);
+		port = g_hover.slot / 16;
+		char buf[64];
+		if (g_hover.bend) {
+			const int raw = std::clamp(g_hover.value + 8192, 0, 16383);
+			msgs.push_back({ u8(0xe0 | ch), u8(raw & 0x7f), u8((raw >> 7) & 0x7f) });
+			std::snprintf(buf, sizeof(buf), "%s Pitch Bend %+d", channel_name(g_hover.slot).c_str(), g_hover.value);
+		} else {
+			msgs.push_back({ u8(0xb0 | ch), 0x01, u8(g_hover.value & 0x7f) });
+			std::snprintf(buf, sizeof(buf), "%s CC1 = %d", channel_name(g_hover.slot).c_str(), g_hover.value);
+		}
+		what = buf;
+		break;
+	}
+	case out_kind::program: {
+		const int part = g_hover.part;
+		const int slot = ram.parts[part][0x04];              // 受信の口 × 16 + ch
+		int msb = 0, lsb = 0, prog = 0;
+		if (slot > 63 || !m.get(P("part.bank_msb"), part, msb) || !m.get(P("part.bank_lsb"), part, lsb) ||
+		    !m.get(P("part.program"), part, prog)) {
+			g_out_note = UI_TEXT(ps_out_no_rcv, "Not sent: the part's receive channel is OFF");
+			g_out_note_at = ImGui::GetTime();
+			return;
+		}
+		const u8 ch = u8(slot & 15);
+		port = slot / 16;
+		msgs.push_back({ u8(0xb0 | ch), 0x00, u8(msb & 0x7f) });
+		msgs.push_back({ u8(0xb0 | ch), 0x20, u8(lsb & 0x7f) });
+		msgs.push_back({ u8(0xc0 | ch), u8(prog & 0x7f) });
+		char buf[64];
+		std::snprintf(buf, sizeof(buf), "%s %d/%d PC %d", channel_name(slot).c_str(), msb, lsb, prog + 1);
+		what = buf;
+		break;
+	}
+	default:
+		return;
+	}
+	const int dest = g_out.dest(port);
+	int sent = 0;
+	for (std::vector<u8> &msg : msgs)
+		if (br.send_out(dest, std::move(msg)))
+			sent++;
+	char buf[160];
+	std::snprintf(buf, sizeof(buf), UI_TEXT(ps_out_sent_fmt, "Sent %s (%d)"), what.c_str(), sent);
+	g_out_note = buf;
+	g_out_note_at = ImGui::GetTime();
+}
+
 int  shape_drum_key() { return g_drum_key; }
 void set_shape_drum_key(int key) { g_drum_key = std::clamp(key, XG_DRUM_KEY0, XG_DRUM_KEY0 + XG_DRUM_KEYS - 1); }
 void request_drum(int part, int key)
@@ -607,6 +843,8 @@ bool param_slider(const char *key, int part, xg::model &m, bridge &br, const cha
 		if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, id))
 			nv = std::min(p.max, nv + step);
 	}
+	if (ImGui::IsItemHovered())
+		out_hover_param(p, part);            // Ctrl＋右クリックで外へ送る
 	const bool changed = nv != v;
 	if (changed)
 		drag_send(br, m.set(p, part, nv));      // ドラッグ中は間引く。キーや数の打ち込みはすぐ送られる

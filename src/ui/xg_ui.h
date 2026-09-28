@@ -15,6 +15,7 @@
 #include "xg/model.h"
 #include "xg/voices.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -130,6 +131,34 @@ int  shape_drum_key();                  // 見ている鍵（13-91）
 void set_shape_drum_key(int key);
 void request_drum(int part, int key);   // 音色の窓をドラムのタブで開く頼み（request_part と同じ道）
 bool take_drum_tab();                   // ドラムのタブを前に出すか（音色の窓が 1 回だけ取る）
+
+// ---- 外の MIDI 出力へ送る（音色の窓の Ctrl＋右クリック）。音源には入れない。
+// シーケンサーに、いま決めた値だけを記録させるため。送り先の品書きは窓の右上
+// 送り先を持っているのは gui.exe だけ（プラグインでは set_out_hooks が呼ばれず、何も出さない）
+struct out_hooks {
+	std::function<std::vector<std::string>()> devices;   // 選べる MIDI 出力
+	std::function<std::string()> chosen;                 // 選んでいる出力の名前（空ならパネルの設定）
+	std::function<std::string()> panel_desc;             // パネルの設定の中身（「A: 機器 / B: 機器」）
+	std::function<void(int)> choose;                     // 選ぶ（-1 でパネルの設定、0 から devices の番号）
+	std::function<int(int port)> dest;                   // 口（0-3）→ bridge::send_out の行き先
+};
+void set_out_hooks(out_hooks h);
+bool out_ready();
+void out_port_combo();                  // 送り先の品書き（と、送った結果のひとこと）
+// 部品がカーソルの下にあるとき、送る中身を名乗る（1 コマごとに out_begin_frame で空に戻る）
+void out_begin_frame();
+void out_hover_param(const xg::param &p, int part);  // パートや共通のパラメータ 1 つ
+void out_hover_drum(int set, int key, int idx);       // ドラムセットアップの 1 項目
+void out_hover_drum_row(int set, int key);            // ドラムセットアップの 1 鍵ぶん（23 項目）
+// XG の番地をじかに（エフェクトのパラメータ）。label は送ったときに出す名前（静的な字）
+void out_hover_raw(u32 addr, int size, const char *label);
+void out_hover_program(int part);                     // 音色（バンクセレクトとプログラムチェンジ）
+// 生の操作子（ホイール）。slot は受信の口 × 16 + ch、bend が偽なら CC1（value 0-127）、
+// 真ならピッチベンド（value は真ん中からの離れ -8192〜8191）
+void out_hover_live(int slot, bool bend, int value);
+void out_hover_group(const std::vector<const char *> &keys, int part);   // 区画ごと（見出しの上。何も名乗っていなければ）
+// Ctrl＋右クリックが来ていれば、名乗られたものを送る。窓の最後に呼ぶ
+void out_end_frame(xg::model &m, const xg_snapshot &ram, bridge &br);
 
 // ---- ファイルの窓（.syx の書き出し・読み込み）。
 // 描画の中からは開けない（窓が回っている間にタイマーが次のコマを描きに来て ImGui に入り直す）。

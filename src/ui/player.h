@@ -35,7 +35,9 @@ public:
 	void stop();
 
 	bool playing() const { return m_playing.load(std::memory_order_acquire); }
-	// 3 口目以降（口 3・4）を A・B に重ねて鳴らすか（偽なら鳴らさない）。流している途中でも変えられる
+	// 音源が USB の口（A-D の 4 口）で受けるか。偽なら DIN の A・B だけ（--host-midi）
+	void set_usb_ports(bool on) { m_usb.store(on, std::memory_order_relaxed); }
+	// DIN の口だけのとき、3 口目以降（口 3・4）を A・B に重ねて鳴らすか（偽なら鳴らさない）。流している途中でも変えられる
 	void set_fold_extra_ports(bool on) { m_fold.store(on, std::memory_order_relaxed); }
 	bool fold_extra_ports() const { return m_fold.load(std::memory_order_relaxed); }
 	// 開いたファイルが使っている口の数（1〜）
@@ -53,6 +55,7 @@ private:
 	std::atomic<bool> m_playing{false};
 	std::atomic<double> m_pos{0};
 	std::atomic<bool> m_fold{true};
+	std::atomic<bool> m_usb{true};
 	int         m_ports_used = 1;
 	double      m_len = 0;
 	std::string m_name;

@@ -1409,6 +1409,11 @@ void panel::paint_front(HDC dc, const snapshot &s, u64 pressed, double volume,
 		if (!sp)
 			continue;
 		const bool down = ((pressed >> int(p.b)) & 1) != 0;
+		// 印刷まで入ったキーごとの絵があれば、それだけ貼る
+		if (const svg_art *face = m_lay.nav_face[i].pick(down, down)) {
+			face->draw(dc, sp->r);
+			continue;
+		}
 		if (const svg_art *pic = m_lay.nav_art.pick(down, down))
 			pic->draw(dc, sp->r);
 		else

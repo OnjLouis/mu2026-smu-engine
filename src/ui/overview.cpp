@@ -511,6 +511,8 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		            known && !dim ? col(ImGuiCol_Text) : col(ImGuiCol_TextDisabled), text.c_str());
 	}
 
+	if (hovered && p)
+		out_hover_param(*p, at);
 	if (hovered && !active) {
 		const char *what = master ? p->label : c.title;
 		if (dim)
@@ -1635,6 +1637,8 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	{
 		static const char *const KEYS[3] = { "part.vib_rate", "part.vib_depth", "part.vib_delay" };
 		const int i = grab >= 0 ? grab : over;
+		if (over >= 0 && known)
+			out_hover_param(*ps[over], part);
 		if (i >= 0 && known) {
 			const char *help = help_for(KEYS[i]);
 			hint(UI_TEXT(ov_value_tip_fmt, "%s  %s\n%s (drag or wheel)"), official_name(KEYS[i]).c_str(), xg::format(*ps[i], vals[i]).c_str(),
@@ -1792,6 +1796,8 @@ int fader_row(const char *const *keys, const char *const *names, int n, int grou
 		}
 	}
 	const int focus = grab >= 0 ? grab : over;
+	if (over >= 0 && have[over])
+		out_hover_param(*ps[size_t(over)], part);
 	if (focus >= 0 && have[focus]) {
 		const char *help = help_for(keys[focus]);
 		hint(UI_TEXT(ov_value_tip_fmt, "%s  %s\n%s (drag or wheel)"), official_name(keys[focus]).c_str(), value_text(keys[focus], vals[focus]).c_str(),
@@ -2551,6 +2557,8 @@ int drum_fader_row(const int *idx, int n, int group_after, int set, int key, bri
 		}
 	}
 	const int focus = grab >= 0 ? grab : over;
+	if (over >= 0)
+		out_hover_drum(set, key, idx[over]);
 	if (focus >= 0) {
 		const std::string hk = std::string("drum.") + dp[idx[focus]].head;
 		const char *help = help_for(hk.c_str());
@@ -3102,6 +3110,10 @@ void overview::mod_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 		const char *help = help_for("part.mw_lfo_pmod");
 		hint(UI_TEXT(ov_param_tip_fmt, "%s  %d\n%s (drag or wheel)"), official_name("part.mw_lfo_pmod").c_str(), vm, help ? help : "");
 	}
+	if (!compact && hovered && over_left && slot >= 0)
+		out_hover_live(slot, false, wheel_now);
+	else if (!compact && hovered && over_right && known)
+		out_hover_param(pm, part);
 	wheel_picture(dl, lx0, lx1, wt, bottom, wheel_now, 127, "MW", grab == 1 || (hovered && over_left));
 	if (!compact)
 		wheel_picture(dl, rx0, rx1, wt, bottom, vm, pm.max, "PM", grab == 2 || (hovered && over_right));
@@ -3498,6 +3510,11 @@ void overview::wobble_cell(int part, xg::model &m, bridge &br, float w, float h)
 			}
 		}
 	}
+	// Ctrl＋右クリックで外へ送るもの（MW は CC1、ベンドはピッチベンド）
+	if (over_mw && slot >= 0)
+		out_hover_live(slot, false, wheel_now);
+	else if (over_bend && slot >= 0)
+		out_hover_live(slot, true, bend);
 	{
 		char t[24];
 		std::snprintf(t, sizeof(t), "%d", wheel_now);

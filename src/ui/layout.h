@@ -87,6 +87,9 @@ struct layout
 		}
 	};
 	art_set mode_art, nav_art, cat_art, round_art, plg_art;
+	// キーごとの絵（nav.face <名前> "絵" "押した絵"）。**キートップの印刷まで入った絵**で、
+	// あればそれを貼って印刷はコードで書かない（字の描き方が描画の道具で変わらない）
+	art_set nav_face[9];
 	// ボタンごとの点灯の絵（mode.on <名前> "絵"）。実機は SAMPLING だけ赤く光る
 	std::shared_ptr<svg_art> mode_on[6];
 	std::string mode_on_path[6];

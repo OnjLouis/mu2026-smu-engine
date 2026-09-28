@@ -104,6 +104,10 @@ public:
 	std::string in_name[4];
 	std::string in_keep[4];
 	std::string out_name, out_name_b, out_name_mu;
+	// 音色の窓の送り先（Ctrl＋右クリックで送るもの）。空ならパネルの設定（A → THRU A、B → THRU B）。
+	// THRU A・B と同じ機器を選んだときはそちらの出力を使い、ほかの機器なら edit_out を開く
+	std::string edit_out_name, edit_out_keep;
+	midi_out    edit_out;
 	std::string out_keep, out_keep_b, out_keep_mu;
 	std::string audio_name;          // the audio device, by name
 	std::string ain_name;            // the recording device, by name
@@ -424,6 +428,7 @@ public:
 		r.volume    = br.gain();
 		r.fold34    = play.fold_extra_ports();
 		r.analog    = eng && eng->analog.load();
+		r.edit_out  = edit_out_name.empty() ? edit_out_keep : edit_out_name;
 		write_settings_file(path, collect_settings(r));
 	}
 
@@ -475,6 +480,53 @@ public:
 	{
 		return open_out(thru_b, out_dev_b, out_name_b, out_keep_b,
 		                "MIDI 出力 B", dev, keep);
+	}
+
+	// 音色の窓の送り先。dev が負ならパネルの設定
+	void choose_edit_out(int dev, bool keep = false)
+	{
+		if (!keep)
+			edit_out_keep.clear();
+		edit_out.close();
+		edit_out_name.clear();
+		if (dev >= 0) {
+			const std::vector<std::string> names = midi_out::list();
+			if (dev < int(names.size())) {
+				const std::string &name = names[size_t(dev)];
+				std::string err;
+				// THRU A・B に使っている機器は開き直さない（同じ機器を 2 度は開けない）
+				if (name == out_name || name == out_name_b || edit_out.open(dev, err))
+					edit_out_name = name;
+				else
+					std::fprintf(stderr, "送り先 %s: %s\n", name.c_str(), err.c_str());
+			}
+		}
+		save_settings();
+	}
+	// 口（0-3）→ 送る行き先（bridge::send_out の dest）
+	int edit_dest(int port) const
+	{
+		if (edit_out_name.empty())
+			return port == 1 ? 1 : 0;            // パネルの設定。C・D は外へ出す端子が無いので A へ
+		if (edit_out_name == out_name)
+			return 0;
+		if (edit_out_name == out_name_b)
+			return 1;
+		return 2;
+	}
+	// 音色の窓に、送り先の品書きと送る道を渡す
+	void wire_send_out()
+	{
+		xgui::out_hooks h;
+		h.devices = [] { return midi_out::list(); };
+		h.chosen = [this] { return edit_out_name; };
+		h.panel_desc = [this] {
+			return "A: " + (out_name.empty() ? std::string("-") : out_name) +
+			       " / B: " + (out_name_b.empty() ? std::string("-") : out_name_b);
+		};
+		h.choose = [this](int dev) { choose_edit_out(dev); };
+		h.dest = [this](int port) { return edit_dest(port); };
+		xgui::set_out_hooks(std::move(h));
 	}
 
 	bool choose_out_mu(int dev, bool keep = false)
@@ -793,6 +845,7 @@ public:
 		for (int p = 1; p < mu2000::MIDI_PORTS; p++)
 			eng.midi_p[p] = &midi[p];
 		eng.mout_b = &thru_b;
+		eng.mout_edit = &edit_out;
 		eng.mout_mu = &mu_out;
 		eng.mout = &thru_a;
 	}
@@ -824,6 +877,7 @@ public:
 		// Decided before booting: reset() learns here whether to queue the
 		// "a host is here" notice
 		eng.mu.set_usb_host(a.usb_host);
+		play.set_usb_ports(a.usb_host);        // ファイルの口 3・4 を C・D へ送るか
 		std::printf(a.usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
 		                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
 		return true;
@@ -879,6 +933,7 @@ public:
 	void setup_for_window(const tool_args &a, const window_options &w, bool factory)
 	{
 		lcd_only = w.lcd_only;
+		wire_send_out();
 		panel.set_lcd_only(lcd_only);
 		if (!lcd_only) {
 			bar.set_items(window_bar_items());
@@ -951,6 +1006,10 @@ public:
 		choose_out(a.mout_dev, true);
 		choose_out_b(a.moutb_dev, true);
 		choose_out_mu(a.moutmu_dev, true);
+		// 音色の窓の送り先。無い機器なら名前だけ覚えておく
+		edit_out_keep = want.edit_out;
+		if (!want.edit_out.empty())
+			choose_edit_out(find_device(midi_out::list(), want.edit_out), true);
 		// A port that would not open keeps showing its remembered name
 		// until it is picked again
 		for (int p = 0; p < 4; p++)
@@ -1080,6 +1139,7 @@ public:
 		thru_a.close();
 		thru_b.close();
 		mu_out.close();
+		edit_out.close();
 	}
 
 	// How the run ended up sounding, when it sounded at all. drops is what

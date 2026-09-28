@@ -203,6 +203,9 @@ struct ui_texts {
 	const char *ed_tab_mixer;
 	const char *ed_tab_part;
 	const char *ed_tab_drum;
+	const char *ed_tab_sysex;
+	const char *sxd_hint;
+	const char *sxd_clear;
 	const char *drum_used_by;
 	const char *drum_none;
 	const char *drum_reset;
@@ -221,8 +224,14 @@ struct ui_texts {
 	const char *ps_tab_shape;
 	const char *ps_tab_all;
 	const char *ps_tab_drum;
+	const char *ps_out_label;
+	const char *ps_out_panel;
+	const char *ps_out_hint;
+	const char *ps_out_sent_fmt;
+	const char *ps_out_no_rcv;
 	const char *ps_drum_not;
 	const char *ps_drum_plain;
+	const char *ps_drum_mode_hint;
 	const char *ps_drum_play;
 	const char *ps_drum_follow;
 	const char *ps_drum_title_mix;

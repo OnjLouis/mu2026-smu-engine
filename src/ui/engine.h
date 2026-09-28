@@ -51,6 +51,7 @@ struct engine {
 	midi_in  *midi_p[mu2000::MIDI_PORTS] = {};
 	midi_out *mout = nullptr;     // MIDI THRU A（A で受けたものを外へ）
 	midi_out *mout_b = nullptr;   // MIDI THRU B（B で受けたものを外へ）
+	midi_out *mout_edit = nullptr; // 音色の窓で選んだ送り先（Ctrl＋右クリックで送るもの）
 	// MIDI OUT。MU2000 が自分で送り出すもの（XG のダンプ要求への返事など）。
 	// これを loopMIDI 越しに外のエディタへ返すと、外から読み書きできる
 	midi_out *mout_mu = nullptr;
@@ -212,6 +213,13 @@ struct engine {
 		drv.apply_buttons(mu, br);
 		// 画面から出したものも、外の MIDI 出力へ流す（実機の THRU）
 		drv.pump_midi(mu, br, [this](u8 v) { if (mout && guard_a.pass(v)) mout->send(v); });
+		// 音色の窓から外へ送るもの（音源には入れない）
+		br.drain_out([this](int dest, const std::vector<u8> &msg) {
+			midi_out *o = dest == 2 ? mout_edit : dest == 1 ? mout_b : mout;
+			if (o)
+				for (u8 v : msg)
+					o->send(v);
+		});
 		drv.pump_wheel(mu, br);
 
 		u8 b;

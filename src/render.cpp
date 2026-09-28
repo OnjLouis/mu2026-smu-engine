@@ -541,11 +541,8 @@ int main(int argc, char **argv)
 			if (ev.size() == 2 && ev[0] == 0xf5)
 				port = std::clamp(int(ev[1]) - 1, 0, mu2000::MIDI_PORTS - 1);
 			else {
-				// ファイルの口 3・4 は gui の既定と同じく A・B に重ねる
-				// USB の口を使うときは C・D まで届くので、ファイルの口をそのまま使う
-				const int to = port >= 0 ? port
-					: usb_host ? std::min<int>(events[next].port, mu2000::MIDI_PORTS - 1)
-					: smf::mu_port(events[next].port, true);
+				// ファイルの口 3・4 は gui と同じく、USB の口なら C・D へ、DIN の口なら A・B に重ねる
+				const int to = port >= 0 ? port : smf::mu_port(events[next].port, true, usb_host);
 				if (trace_midi)
 					trace_event(next, events[next], to);
 				if (const char *reset = reset_name(ev))

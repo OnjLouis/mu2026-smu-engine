@@ -33,6 +33,7 @@ inline constexpr const char *SET_CARD = "smartmedia";
 inline constexpr const char *SET_PORTS34 = "ports34";
 inline constexpr const char *SET_OUTPUT = "output";
 inline constexpr const char *SET_VOLUME = "volume";
+inline constexpr const char *SET_EDIT_OUT = "edit_out";   // 音色の窓の送り先（空はパネルの設定）
 
 // The whole file as key/value pairs, in file order.
 using settings_map = std::vector<std::pair<std::string, std::string>>;
@@ -93,6 +94,7 @@ struct remembered {
 	float volume = 1.0f;  // the panel's VOLUME knob
 	bool fold34 = true;   // ports34=fold (MIDI file ports 3+4 onto A+B)
 	bool analog = false;  // output=analog (DC removed)
+	std::string edit_out; // edit_out= (the voice window's send-to port; empty = the panel's ports)
 };
 
 // Struct to file rows, in file order
@@ -112,6 +114,7 @@ inline settings_map collect_settings(const remembered &r)
 	kv.emplace_back(SET_VOLUME, vol);
 	kv.emplace_back(SET_PORTS34, r.fold34 ? "fold" : "drop");
 	kv.emplace_back(SET_OUTPUT, r.analog ? "analog" : "digital");
+	kv.emplace_back(SET_EDIT_OUT, r.edit_out);
 	return kv;
 }
 
@@ -130,6 +133,7 @@ inline void apply_settings(const settings_map &kv, remembered &r)
 	if (const std::string *v = find_setting(kv, SET_CARD))    r.card    = *v;
 	if (const std::string *v = find_setting(kv, SET_PORTS34)) r.fold34  = *v != "drop";
 	if (const std::string *v = find_setting(kv, SET_OUTPUT))  r.analog  = *v == "analog";
+	if (const std::string *v = find_setting(kv, SET_EDIT_OUT)) r.edit_out = *v;
 	if (const std::string *v = find_setting(kv, SET_VOLUME)) {
 		if (!v->empty())
 			r.volume = std::clamp(float(std::atof(v->c_str())), 0.0f, 1.0f);

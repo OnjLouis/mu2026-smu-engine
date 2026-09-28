@@ -400,6 +400,26 @@ bool layout::load(const std::string &path, std::string &err)
 			}
 		}
 		else if (key == "mode.r") { if (need(3)) { mode_r = num(t[1]); mode_led_r = num(t[2]); } }
+		else if (key == "nav.face") {
+			if (!need(3)) continue;
+			int at = -1;
+			for (int i = 0; i < 9; i++) if (t[1] == NAV_NAMES[i]) at = i;
+			if (at < 0) { bad("そんな四角いボタンは無い"); continue; }
+			art_set &a = nav_face[at];
+			a = art_set();
+			for (size_t i = 2; i < t.size() && i <= 3; i++) {
+				if (t[i].empty())
+					continue;
+				auto pic = std::make_shared<svg_art>();
+				if (!pic->load_file(beside(path, t[i])))
+					bad("ボタンの絵を開けない（または読めない形）");
+				else {
+					// 1 枚目が離した絵、2 枚目が押した絵（pick の down は pic[1] に落ちる）
+					a.pic[i - 2] = pic;
+					a.path[i - 2] = t[i];
+				}
+			}
+		}
 		else if (key == "mode.on") {
 			if (!need(3)) continue;
 			int at = -1;
@@ -535,6 +555,15 @@ bool layout::save(const std::string &path) const
 		for (int i = 0; i < 6; i++)
 			if (!mode_on_path[i].empty())
 				std::fprintf(f, "mode.on %s \"%s\"\n", MODE_NAMES[i], mode_on_path[i].c_str());
+		for (int i = 0; i < 9; i++) {
+			if (!nav_face[i].any())
+				continue;
+			std::fprintf(f, "nav.face %s", NAV_NAMES[i]);
+			for (int k = 0; k < 2; k++)
+				if (!nav_face[i].path[k].empty())
+					std::fprintf(f, " \"%s\"", nav_face[i].path[k].c_str());
+			std::fprintf(f, "\n");
+		}
 	}
 	std::fprintf(f, "plg  %g %g %g      # MU / PLG-1..3 の表示灯  左端 間隔 y\n",
 	             plg[0], plg[1], plg[2]);

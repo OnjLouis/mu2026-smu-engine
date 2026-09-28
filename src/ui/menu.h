@@ -310,8 +310,8 @@ inline std::vector<menu_group> menu_card(const menu_state &s)
 	g.items.push_back(text(stop, ID_STOP_FILE, false, s.playing));
 	// What to do with a MIDI file that uses ports 3 and 4
 	g.items.push_back(separator());
-	g.items.push_back(text(UI_TEXT(menu_fold34, "Fold ports 3+4 onto A and B"), ID_PORTS34_FOLD, s.fold34, true));
-	g.items.push_back(text(UI_TEXT(menu_drop34, "Drop ports 3+4"), ID_PORTS34_DROP, !s.fold34, true));
+	g.items.push_back(text(UI_TEXT(menu_fold34, "Fold ports 3+4 onto A and B (DIN ports only)"), ID_PORTS34_FOLD, s.fold34, true));
+	g.items.push_back(text(UI_TEXT(menu_drop34, "Drop ports 3+4 (DIN ports only)"), ID_PORTS34_DROP, !s.fold34, true));
 	groups.push_back(g);
 	return groups;
 }

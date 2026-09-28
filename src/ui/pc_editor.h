@@ -35,6 +35,8 @@ private:
 	void part_page(xg::model &m, bridge &br);
 	// ドラムセットアップ（DRUMS1-4）の面。行が鍵 13-91、列が 1 鍵ぶんの 23 個
 	void drum_page(xg::model &m, const xg_snapshot &ram, bridge &br);
+	// SysEx の読み解き。左に貼り付ける欄、右に 1 行ずつの意味（ui/sysex_decode.h）
+	void decode_page(xg::model &m);
 
 	// 1 つの値を触る部品。数を並べる形（普段）と、つまみの形（開いたとき）がある。
 	// 選ぶ種類の値（MONO/POLY など）は品書きになる。width は数の形の幅
@@ -48,6 +50,7 @@ private:
 	double m_scrolled_at = -1;  // 最後にホイールで表をスクロールした時刻（ImGui の時計）
 	bool m_wheel_taken = false; // このコマでつまみがホイールを取ったか
 	int  m_drum_set = 0;        // ドラムの面で見ている組（0-3 = DRUMS1-4）
+	char m_sx_text[65536] = {}; // 読み解く MIDI（貼り付けた字）
 };
 
 } // namespace ui

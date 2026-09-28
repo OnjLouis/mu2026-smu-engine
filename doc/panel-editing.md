@@ -196,6 +196,17 @@ plg.art   "plg.svg" "plg-on.svg"                  # MU / PLG-1..3 の表示灯
 絵は部品の四角にそのまま当てはまる。**LED とボタンは 1 枚に描いてよい**
 （実機も兼用なので、そのほうが描きやすい）。
 
+右端の四角いボタンは、**キーごとに印刷まで入った絵**も渡せる。渡したキーは
+`nav.art` の代わりにその絵を貼り、キートップの字と記号をコードで書かない
+（字の描き方が描画の道具で変わらない）。名前は `mute_solo`・`part-`・`part+`・
+`enter`・`select-`・`select+`・`exit`・`value-`・`value+`。
+
+```
+nav.face part-  "key-part_minus.png" "key-part_minus-down.png"   # ふつう、押している
+```
+
+写真調（`art/real`）は `tools/panel_art/make_panel.py` がこの 18 枚を作る。
+
 `art/sample/` に見本が入っている。
 
 ```bash
