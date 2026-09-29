@@ -293,17 +293,17 @@ private:
 
 	// ---- A/D INPUT。ホストの周波数で来る音を 44100 に直して溜め、音源が 1 サンプル進むごとに 1 つ使う
 	ui::resampler m_in_rs;
-	std::array<ui::resampler, 6> m_fx_rs;
+	std::array<ui::resampler, mu2000::EXTERNAL_FX_BUS_COUNT / 2> m_fx_rs;
 	static constexpr int IN_RING = 8192, IN_MASK = IN_RING - 1;
 	s16     m_in_q[IN_RING * 2] = {};
 	int     m_in_w = 0, m_in_r = 0;
 	std::vector<s16> m_in_stage;
 	std::vector<float> m_in_conv;
 	void push_input(const float *in_l, const float *in_r, int n);
-	float   m_fx_q[IN_RING * 12] = {};
+	float   m_fx_q[IN_RING * mu2000::EXTERNAL_FX_BUS_COUNT] = {};
 	int     m_fx_w = 0, m_fx_r = 0;
-	std::vector<s16> m_fx_stage;
-	std::array<std::vector<float>, 6> m_fx_conv;
+	std::vector<float> m_fx_stage;
+	std::array<std::vector<float>, mu2000::EXTERNAL_FX_BUS_COUNT / 2> m_fx_conv;
 	void push_fx_buses(const float *const *buses, int n);
 
 	ui::bridge m_bridge;

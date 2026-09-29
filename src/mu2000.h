@@ -250,7 +250,7 @@ public:
 	// 値は MAME 内部と同じ目盛りで、全振幅が DAC_FULL_SCALE。
 	// 16bit にするときは >> 2（MAME の put_int_clamp(..., 1<<17) と同じ）
 	static constexpr s32 DAC_FULL_SCALE = 1 << 17;
-	static constexpr int EXTERNAL_FX_BUS_COUNT = 12;
+	static constexpr int EXTERNAL_FX_BUS_COUNT = 16;
 	void set_external_fx_buses(const std::array<float, EXTERNAL_FX_BUS_COUNT> &buses);
 	void run_sample(s32 &left, s32 &right);
 

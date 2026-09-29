@@ -57,7 +57,7 @@ public:
 		m_effect.get_parameter = get_parameter_thunk;
 		m_effect.num_programs = 1;
 		m_effect.num_params = 1;
-		m_effect.num_inputs = 12;
+		m_effect.num_inputs = mu2000::EXTERNAL_FX_BUS_COUNT;
 		m_effect.num_outputs = 2;
 		m_effect.flags = has_editor | can_replacing | program_chunks | is_synth;
 		m_effect.object = this;
@@ -382,8 +382,8 @@ private:
 		for (const queued_event &e : m_events) {
 			const vint32 at = std::clamp(e.offset, done, frames);
 			if (at > done) {
-				const float *buses[12] = {};
-				for (int i = 0; i != 12; i++)
+				const float *buses[mu2000::EXTERNAL_FX_BUS_COUNT] = {};
+				for (int i = 0; i != mu2000::EXTERNAL_FX_BUS_COUNT; i++)
 					buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
 				m_engine.fill(left + done, right + done, at - done, nullptr, nullptr, buses);
 			}
@@ -392,8 +392,8 @@ private:
 		}
 		m_events.clear();
 		if (done < frames) {
-			const float *buses[12] = {};
-			for (int i = 0; i != 12; i++)
+			const float *buses[mu2000::EXTERNAL_FX_BUS_COUNT] = {};
+			for (int i = 0; i != mu2000::EXTERNAL_FX_BUS_COUNT; i++)
 				buses[i] = inputs && inputs[i] ? inputs[i] + done : nullptr;
 			m_engine.fill(left + done, right + done, frames - done, nullptr, nullptr, buses);
 		}

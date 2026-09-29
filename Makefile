@@ -1117,8 +1117,13 @@ ifeq ($(PLATFORM),windows)
 CHECK_PLUGIN := $(BUILD)/vstiprobe$(EXE) $(VSTI_BIN)
 endif
 
-check: $(BUILD)/verify$(EXE) $(CHECK_PLUGIN)
+$(BUILD)/resampler_probe$(EXE): $(BUILD)/src/ui/resampler_probe.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+check: $(BUILD)/verify$(EXE) $(BUILD)/resampler_probe$(EXE) $(CHECK_PLUGIN)
 	$(BUILD)/verify$(EXE)
+	$(BUILD)/resampler_probe$(EXE)
 ifeq ($(PLATFORM),windows)
 	$(BUILD)/vstiprobe$(EXE) $(VSTI_BIN)
 endif

@@ -930,6 +930,7 @@ public:
 		case 0x0e: p.pan = dd; break;
 		case 0x12: p.cho = dd; break;
 		case 0x13: p.rev = dd; break;
+		case 0x14: p.var = dd; apply_cc(part); break;
 		case 0x18: p.bri = dd; break;
 		case 0x15: p.vrate = dd; break;
 		case 0x16: p.vdep = dd; break;
@@ -1481,6 +1482,7 @@ public:
 			break;
 		case 0x5b: p.rev = value; break;
 		case 0x5d: p.cho = value; break;
+		case 0x5e: p.var = value; apply_cc(part); return false;
 		case 0x4a: p.bri = value; break;
 		case 0x47: p.res = value; break;
 		// **モノ / ポリ**（6.125）。モノのパートは、つぎの鍵を押すと
@@ -1572,14 +1574,6 @@ public:
 			all_off(part);
 			return false;
 		default: {
-			// バリエーション送り。ワーク RAM には出てこない（掛かり先が
-			// パートに繋がっていないと firmware が何も書かない）ので、
-			// **口の側で覚えて経路の印に混ぜる**。送りの値は写し取った
-			// ミキサのレジスタに入っているので、値が変われば取り直せばよい
-			if (cc == 0x5e) {
-				p.var = value;
-				return false;                  // firmware にも見せる（写し取りのため）
-			}
 			// 知らない CC は AC1・AC2 に割り当てられているかもしれない
 			assignable(part, cc, value);
 			return false;                      // 知らない CC は firmware に任せる
@@ -1698,12 +1692,13 @@ private:
 				                  s.rnd_drop, s.base33));
 			if (s.cal->has(0x34))
 				m_poke(u32(i) * 64 + 0x34,
-				       s.cal->synth
-				       ? (ins_routed(part)
-				          ? u16((exact_send(s, part, true, s.base34) & 0xff00) | 0x10)
-				          : exact_send(s, part, true, s.base34))
-				       : send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho,
-				                  s.rnd_drop, s.base34));
+				       variation_send(s, part,
+				           s.cal->synth
+				           ? (ins_routed(part)
+				              ? u16((exact_send(s, part, true, s.base34) & 0xff00) | 0x10)
+				              : exact_send(s, part, true, s.base34))
+				           : send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho,
+				                      s.rnd_drop, s.base34)));
 			if (s.cut)
 				m_poke(u32(i) * 64 + 0x00,
 				       cutoff_reg(s.cut, *s.cal, part, s.elem, s.keynote));
@@ -2636,6 +2631,30 @@ private:
 		           : u16((base & 0xff00) | u16(v));
 	}
 
+	u16 variation_send(const slot_use &s, int part, u16 base) const
+	{
+		if (!m_ram || m_ram[ram::VAR_BLOCK + ram::VAR_CONNECT] != 1 || ins_routed(part))
+			return base;
+		int extra = 127;
+		int pan = 64;
+		if (s.rnd_pan >= 0)
+			pan = 0;
+		else if (s.elem && s.sfx)
+			pan = nv::voice_pan_pos(m_rom, s.elem, s.note, sfx_pan(part, s.keynote));
+		else if (s.elem)
+			pan = nv::voice_pan_pos(m_rom, s.elem, s.note);
+		else {
+			const int drum_pan = drum_setup_of(part, s.keynote, 0x04);
+			pan = drum_pan < 0 ? 64 : drum_pan;
+		}
+		if (!s.elem || s.sfx) {
+			const int drum_send = drum_setup_of(part, s.keynote, 0x07);
+			extra = drum_send < 0 ? 127 : drum_send;
+		}
+		const int send = m_cc[part].var >= 0 ? m_cc[part].var : part_ram(part, 0x14);
+		return u16((base & 0xff00) | nv::send_level_att(m_rom, send, extra, pan));
+	}
+
 	u16 pan_reg(const nv::voice_cal &c, int part, int rnd, u16 base) const
 	{
 		// Rnd のときは**音色のパンの寄りを無視して**、当たった位置そのもの
@@ -3261,6 +3280,7 @@ public:
 					                      su.rnd_drop, su.base34));
 				}
 			}
+			sr.set(0x34, variation_send(su, part, sr.v[0x34]));
 			write_slot(slot, sr);
 			if (debug_on())
 				std::fprintf(stderr, "note part=%d note=%d vel=%d vol=%d/%d expr=%d/%d pan=%d/%d att=%d->%d\n",
@@ -3595,6 +3615,7 @@ public:
 					const int dp = drum_setup_of(part, su.keynote, 0x04);
 					ins_mixer(dr, dp < 0 ? 64 : dp, ins_target(part));
 				}
+				dr.set(0x34, variation_send(su, part, dr.v[0x34]));
 			}
 			// **つまみの差を乗せる元**。写しがあればその値、
 			// 無ければドラムセットアップから組んだ値
@@ -3614,8 +3635,9 @@ public:
 					              : (i == 0x0a ? lfo_reg(c.reg[0x0a], c, part)
 					              : (i == 0x33 ? send_reg(c, 0x33, false, m_cc[part].rev, c.cal_rev,
 					                                      su.rnd_drop, su.base33)
-					              : (i == 0x34 ? send_reg(c, 0x34, true, m_cc[part].cho, c.cal_cho,
-					                                      su.rnd_drop, su.base34)
+				              : (i == 0x34 ? variation_send(su, part,
+				                       send_reg(c, 0x34, true, m_cc[part].cho, c.cal_cho,
+				                                su.rnd_drop, su.base34))
 					                           : c.reg[i])))));
 
 			// **フィルタの第 2 段（ハイパス）は打つたびに式で書く**。実機は打つたびに

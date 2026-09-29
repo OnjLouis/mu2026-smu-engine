@@ -95,12 +95,31 @@ public:
 		}
 	}
 
+	void push_float(const float *in, int frames)
+	{
+		for (int i = 0; i < frames; i++) {
+			m_ring_l[m_written & RMASK] = in[i * 2 + 0];
+			m_ring_r[m_written & RMASK] = in[i * 2 + 1];
+			m_written++;
+		}
+	}
+
 	// float 2ch インタリーブで出す
 	void pull(float *out, int frames)
 	{
 		for (int i = 0; i < frames; i++) {
 			float l = 0.0f, r = 0.0f;
-			one(l, r);
+			one(l, r, true);
+			out[i * 2 + 0] = l;
+			out[i * 2 + 1] = r;
+		}
+	}
+
+	void pull_unclamped(float *out, int frames)
+	{
+		for (int i = 0; i < frames; i++) {
+			float l = 0.0f, r = 0.0f;
+			one(l, r, false);
 			out[i * 2 + 0] = l;
 			out[i * 2 + 1] = r;
 		}
@@ -132,7 +151,7 @@ private:
 		}
 	}
 
-	void one(float &l, float &r)
+	void one(float &l, float &r, bool clamp_output)
 	{
 		const s64 centre = s64(std::floor(m_pos));
 		if (m_direct) {
@@ -162,8 +181,8 @@ private:
 			al /= sum;
 			ar /= sum;
 		}
-		l = float(std::clamp(al, -1.0, 1.0));
-		r = float(std::clamp(ar, -1.0, 1.0));
+		l = clamp_output ? float(std::clamp(al, -1.0, 1.0)) : float(al);
+		r = clamp_output ? float(std::clamp(ar, -1.0, 1.0)) : float(ar);
 		m_pos += m_step;
 	}
 

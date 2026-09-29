@@ -3077,10 +3077,11 @@ void swp30_device::mixer_step(const std::array<s32, 0x40> &samples_per_chan)
 	m_rec_bus = mixer_out[0x10];   // S-MU2000: 録音はミキサの出力 8 の左（sample_step）
 	std::copy(mixer_out.begin() + 0x00, mixer_out.begin() + 0x10, m_melo.begin());
 	std::copy(mixer_out.begin() + 0x10, mixer_out.begin() + 0x20, m_meg->m_m.begin() + 0x20);
-	static constexpr int external_bus_slots[10] = {
-		0x20, 0x21, 0x24, 0x25, 0x26, 0x27, 0x2c, 0x2d, 0x28, 0x29
+	static constexpr int external_bus_slots[14] = {
+		0x20, 0x21, 0x24, 0x25, 0x26, 0x27, 0x2c, 0x2d,
+		0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d
 	};
-	for(int i = 0; i != 10; i++) {
+	for(int i = 0; i != 14; i++) {
 		const int slot = external_bus_slots[i];
 		m_meg->m_m[slot] = s32(std::clamp<s64>(s64(m_meg->m_m[slot]) + m_external_fx_buses[i],
 		                                      std::numeric_limits<s32>::min(), std::numeric_limits<s32>::max()));

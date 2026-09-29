@@ -3169,8 +3169,8 @@ void mu2000::native_fx_update()
 
 void mu2000::set_external_fx_buses(const std::array<float, EXTERNAL_FX_BUS_COUNT> &buses)
 {
-	std::array<s32, 10> master{};
-	std::array<s32, 10> slave{};
+	std::array<s32, 14> master{};
+	std::array<s32, 14> slave{};
 	// External sources can exceed unity before MEG attenuation; keep that headroom.
 	for(int i = 0; i != EXTERNAL_FX_BUS_COUNT; i++) {
 		const float sample = std::isfinite(buses[i]) ? buses[i] : 0.0f;

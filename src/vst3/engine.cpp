@@ -649,32 +649,31 @@ void engine::push_fx_buses(const float *const *buses, int n)
 		return;
 	for (int at = 0; at < n;) {
 		const int k = std::min(1024, n - at);
-		for (int pair = 0; pair != 6; pair++) {
+		for (int pair = 0; pair != mu2000::EXTERNAL_FX_BUS_COUNT / 2; pair++) {
 			m_fx_stage.resize(size_t(k) * 2);
 			for (int i = 0; i != k; i++)
 				for (int side = 0; side != 2; side++) {
 					const int bus = pair * 2 + side;
 					const float *src = buses ? buses[bus] : nullptr;
-					m_fx_stage[size_t(i) * 2 + side] = s16(std::lround(
-						std::clamp(src ? src[at + i] : 0.0f, -1.0f, 1.0f) * 32767.0f));
+					m_fx_stage[size_t(i) * 2 + side] = src ? src[at + i] : 0.0f;
 				}
-			m_fx_rs[pair].push(m_fx_stage.data(), k);
+			m_fx_rs[pair].push_float(m_fx_stage.data(), k);
 		}
 		at += k;
 		int available = m_fx_rs[0].output_available();
-		for (int pair = 1; pair != 6; pair++)
+		for (int pair = 1; pair != mu2000::EXTERNAL_FX_BUS_COUNT / 2; pair++)
 			available = std::min(available, m_fx_rs[pair].output_available());
 		if (available <= 0)
 			continue;
-		for (int pair = 0; pair != 6; pair++) {
+		for (int pair = 0; pair != mu2000::EXTERNAL_FX_BUS_COUNT / 2; pair++) {
 			m_fx_conv[pair].resize(size_t(available) * 2);
-			m_fx_rs[pair].pull(m_fx_conv[pair].data(), available);
+			m_fx_rs[pair].pull_unclamped(m_fx_conv[pair].data(), available);
 		}
 		for (int i = 0; i != available; i++) {
 			const int next = (m_fx_w + 1) & IN_MASK;
 			if (next == m_fx_r)
 				break;
-			for (int pair = 0; pair != 6; pair++)
+			for (int pair = 0; pair != mu2000::EXTERNAL_FX_BUS_COUNT / 2; pair++)
 				for (int side = 0; side != 2; side++)
 					m_fx_q[m_fx_w * mu2000::EXTERNAL_FX_BUS_COUNT + pair * 2 + side] =
 						m_fx_conv[pair][size_t(i) * 2 + side];

@@ -59,6 +59,9 @@ endforeach()
 # Regression suite entry point: ctest runs what `make test` runs without ROMs.
 enable_testing()
 add_test(NAME verify COMMAND verify)
+add_executable(resampler_probe src/ui/resampler_probe.cpp)
+target_include_directories(resampler_probe PRIVATE src src/compat)
+add_test(NAME resampler_probe COMMAND resampler_probe)
 
 # ---- Linux: live + VST3 + CLAP (needs ALSA) ----------------------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

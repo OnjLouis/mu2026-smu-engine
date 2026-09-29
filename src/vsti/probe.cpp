@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -35,13 +36,13 @@ bool finite_audio(const std::vector<float> &v)
 
 bool probe_hybrid_fx(effect *fx, double sample_rate)
 {
-	if (fx->num_inputs != 12) {
-		std::fprintf(stderr, "hybrid FX requires twelve input buses, got %d\n", fx->num_inputs);
+	if (fx->num_inputs != 16) {
+		std::fprintf(stderr, "hybrid FX requires sixteen input buses, got %d\n", fx->num_inputs);
 		return false;
 	}
 	constexpr int block = 256;
 	std::vector<float> silence(block), signal(block), left(block), right(block);
-	float *inputs[12] = {};
+	float *inputs[16] = {};
 	float *outputs[2] = { left.data(), right.data() };
 	for (float *&input : inputs)
 		input = silence.data();
@@ -93,22 +94,29 @@ bool probe_hybrid_fx(effect *fx, double sample_rate)
 	                           0x01, 0x00, 0x49, 0x00, char(0xf7) };
 	char insertion2_part[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
 	                           0x01, 0x0c, 0x00, char(0xf7) };
-	ins_type_event.dump = insertion2_type;
-	ins_part_event.dump = insertion2_part;
-	fx->dispatcher(fx, eff_process_events, 0, 0, &insertion_setup, 0);
-	for (int i = 0; i < 100; i++)
-		fx->process_replacing(fx, inputs, outputs, block);
-	const auto insertion2 = measure(10);
+	std::array<std::pair<double, double>, 3> slaveInsertions{};
+	std::array<std::pair<double, double>, 3> slaveBypasses{};
 	char insertion2_thru[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x03,
 	                           0x01, 0x00, 0x00, 0x00, char(0xf7) };
-	ins_type_event.dump = insertion2_thru;
 	struct { vint32 count; vintptr reserved; event *items[1]; } bypass_setup{};
 	bypass_setup.count = 1;
 	bypass_setup.items[0] = reinterpret_cast<event *>(&ins_type_event);
-	fx->dispatcher(fx, eff_process_events, 0, 0, &bypass_setup, 0);
-	for (int i = 0; i < 100; i++)
-		fx->process_replacing(fx, inputs, outputs, block);
-	const auto insertion2_through = measure(10);
+	for (int index = 0; index < 3; ++index) {
+		insertion2_type[5] = char(index + 1);
+		insertion2_part[5] = char(index + 1);
+		ins_type_event.dump = insertion2_type;
+		ins_part_event.dump = insertion2_part;
+		fx->dispatcher(fx, eff_process_events, 0, 0, &insertion_setup, 0);
+		for (int i = 0; i < 100; i++)
+			fx->process_replacing(fx, inputs, outputs, block);
+		slaveInsertions[index] = measure(10 + index * 2);
+		insertion2_thru[5] = char(index + 1);
+		ins_type_event.dump = insertion2_thru;
+		fx->dispatcher(fx, eff_process_events, 0, 0, &bypass_setup, 0);
+		for (int i = 0; i < 100; i++)
+			fx->process_replacing(fx, inputs, outputs, block);
+		slaveBypasses[index] = measure(10 + index * 2);
+	}
 	char variation_type[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02, 0x01,
 	                          0x40, 0x05, 0x00, char(0xf7) };
 	char variation_system[] = { char(0xf0), 0x43, 0x10, 0x4c, 0x02,
@@ -130,17 +138,25 @@ bool probe_hybrid_fx(effect *fx, double sample_rate)
 	const auto variation = measure(6);
 	std::printf("hybrid buses: dry %.8g / %.8g, reverb %.8g / %.8g, "
 	            "chorus %.8g / %.8g, insertion %.8g / %.8g, "
-	            "insertion2 %.8g / %.8g, bypass %.8g / %.8g, "
+	            "insertion2 %.8g / %.8g, insertion3 %.8g / %.8g, "
+	            "insertion4 %.8g / %.8g, bypasses %.8g %.8g %.8g, "
 	            "variation %.8g / %.8g (early/tail)\n",
 	            dry.first, dry.second, reverb.first, reverb.second,
 	            chorus.first, chorus.second, insertion.first, insertion.second,
-	            insertion2.first, insertion2.second,
-	            insertion2_through.first, insertion2_through.second,
+	            slaveInsertions[0].first, slaveInsertions[0].second,
+	            slaveInsertions[1].first, slaveInsertions[1].second,
+	            slaveInsertions[2].first, slaveInsertions[2].second,
+	            slaveBypasses[0].first, slaveBypasses[1].first,
+	            slaveBypasses[2].first,
 	            variation.first, variation.second);
 	return dry.first > 1e-5 && reverb.second > 1e-4
 		&& chorus.second > 1e-4 && insertion.first > 1e-3
-		&& insertion2.first > 1e-3
-		&& std::abs(insertion2.first - insertion2_through.first) > 1e-3
+		&& slaveInsertions[0].first > 1e-3
+		&& std::abs(slaveInsertions[0].first - slaveBypasses[0].first) > 1e-3
+		&& slaveInsertions[1].first > 1e-3
+		&& std::abs(slaveInsertions[1].first - slaveBypasses[1].first) > 1e-3
+		&& slaveInsertions[2].first > 1e-3
+		&& std::abs(slaveInsertions[2].first - slaveBypasses[2].first) > 1e-3
 		&& variation.second > 1e-4;
 }
 
