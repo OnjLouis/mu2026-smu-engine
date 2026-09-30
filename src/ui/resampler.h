@@ -57,6 +57,7 @@ public:
 		std::memset(m_ring_l, 0, sizeof(m_ring_l));
 		std::memset(m_ring_r, 0, sizeof(m_ring_r));
 		m_written = 0;
+		m_last_nonzero = -1;
 		m_pos     = 0.0;
 	}
 
@@ -91,6 +92,8 @@ public:
 		for (int i = 0; i < frames; i++) {
 			m_ring_l[m_written & RMASK] = float(in[i * 2 + 0]) * k;
 			m_ring_r[m_written & RMASK] = float(in[i * 2 + 1]) * k;
+			if (in[i * 2] != 0 || in[i * 2 + 1] != 0)
+				m_last_nonzero = m_written;
 			m_written++;
 		}
 	}
@@ -100,6 +103,8 @@ public:
 		for (int i = 0; i < frames; i++) {
 			m_ring_l[m_written & RMASK] = in[i * 2 + 0];
 			m_ring_r[m_written & RMASK] = in[i * 2 + 1];
+			if (in[i * 2] != 0.0f || in[i * 2 + 1] != 0.0f)
+				m_last_nonzero = m_written;
 			m_written++;
 		}
 	}
@@ -161,6 +166,13 @@ private:
 			m_pos += 1.0;
 			return;
 		}
+		// Skip only a completely zero FIR window, after its last real tail.
+		// Advance the same clock so a later burst keeps its exact alignment.
+		if (centre - HALF + 1 > m_last_nonzero) {
+			l = r = 0.0f;
+			m_pos += m_step;
+			return;
+		}
 		double al = 0.0, ar = 0.0, sum = 0.0;
 		for (int k = -HALF + 1; k <= HALF; k++) {
 			const s64 idx = centre + k;
@@ -190,6 +202,7 @@ private:
 	float   m_ring_l[RING] = {};
 	float   m_ring_r[RING] = {};
 	s64     m_written = 0;
+	s64     m_last_nonzero = -1;
 	double  m_pos = 0.0;
 	double  m_step = 1.0;
 	double  m_cutoff = 1.0;
