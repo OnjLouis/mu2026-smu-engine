@@ -15,10 +15,9 @@
 //
 //   * the program (state, paint, menus, bring-up, run) is ui::app (ui/app.h)
 //   * the AppKit half of the app class is ui::gui_app (ui/app_mac.h), and
-//     the window system is window_mac.mm -- separate files because the
-//     Cocoa headers and compat/gdi.h cannot both be visible at once
-//   * drawing goes into the view's CGContext through the GDI shim, so
-//     panel.cpp is literally the same code that paints the Windows window
+//     the window system is window_mac.mm
+//   * drawing goes through Metal + Dear ImGui (ui/imgui_shell.h), the same
+//     code that paints the Windows/Linux windows
 //   * settings live in ~/Library/Application Support/S-MU2000/gui.ini
 //
 // Audio is produced the same way as in live: **it keeps no clock of its own**
@@ -27,8 +26,11 @@
 // The mouse wheel drives the dial. The real machine has a rotary encoder in
 // that spot too, and it does the same job as the VALUE -/+ buttons.
 
+#include "compat/cli_text.h"
 #include "compat/console.h"
 #include "mu2000.h"
+
+#include "ui/rom_locate.h"
 #include "ui/app.h"
 #include "ui/app_mac.h"
 #include "ui/lang.h"
@@ -36,6 +38,7 @@
 int main(int argc, char **argv)
 {
 	smu2000::init_console_utf8();
+	smu2000::cli::init(argc, argv);       // -jp で、コンソールの言葉を日本語に
 
 	ui::tool_args a;
 	a.latency = 30;        // per-backend default; the shared parser keeps it
@@ -45,6 +48,9 @@ int main(int argc, char **argv)
 
 	// The flags are shared (ui/tool_args.h); only latency above stays per side
 	const int parsed = ui::parse_tool_args(argc, argv, a, eng_opts, out_opts, win_opts);
+	// コンソールの言葉は、画面の言葉が日本語なら日本語（-jp や SMU2000_LANG でも）
+	if (ui::get_lang() == ui::lang::ja)
+		smu2000::cli::set_japanese(true);
 	// The language resolves here, from the parsed --lang (then editor.ini,
 	// then the locale), before any texts() use below
 	ui::init_lang(a.lang.c_str());
@@ -61,6 +67,10 @@ int main(int argc, char **argv)
 	if (!a.shot_path.empty() && (a.dir.empty() || !a.boot_for_shot))
 		return ui::empty_shot(br, a, win_opts);
 
+	// ROM の場所を渡されなければ（ダブルクリックなど）、プラグインと同じ順番で探し、無ければ選んでもらう
+	// （ui/rom_locate.h、issue #89）
+	if (a.dir.empty())
+		a.dir = ui::locate_roms_for_gui(smu2000::exe_dir());
 	if (a.dir.empty()) {
 		ui::print_usage();
 		return 1;

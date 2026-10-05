@@ -152,6 +152,16 @@ with `aconnect` (details: [linux.md](linux.md), Japanese).
 
 ### Audio output and latency
 
+Click the **PHONES jack** on the front panel and open **Audio output device**
+(also available in the panel's right-click menu). Pick your speakers, headphones,
+or **System default**. The output switches immediately without rebooting the MU2000
+and the choice is remembered. The list is refreshed whenever the menu opens;
+after connecting or disconnecting a device, reopen the menu. If the new device
+cannot be opened, an error is shown and the previous output is restored if available.
+This picker is shared by the Windows, macOS and Linux standalone apps. Plugin
+output devices are controlled by the DAW. The PHONES digital/analog options
+still control the emulated output processing separately.
+
 Choose the output device at startup with `--audio "part of the name"` (list names with `--list`).
 It is remembered afterwards.
 
@@ -186,7 +196,7 @@ It works like the real front panel; the LCD shows exactly what the firmware writ
 | VOLUME | Drag, or wheel over it. Final output level applied outside the synth |
 | Card slot (bottom left) | Create / insert / eject SmartMedia; play and stop MIDI files |
 | A/D INPUT jack | Choose the recording device used for sampling |
-| PHONES jack | Choose digital or analog output behaviour |
+| PHONES jack | Choose the audio output device (standalone), and digital or analog output behaviour |
 
 | Key | Button |
 |---|---|

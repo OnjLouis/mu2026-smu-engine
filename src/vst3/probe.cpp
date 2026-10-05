@@ -9,6 +9,8 @@
 // --automation は XG の値のパラメータ（src/vst3/automation.h）を試す: 一覧、値を送って音源に入ったか、
 //   状態の保存と復元、機械まるごとの状態を抜いて XG の値の控えだけで戻るか
 // --view のとき、画面で値を触ると beginEdit / performEdit / endEdit が出る
+// --fl は FL Studio の外し方のまね（親の窓を先に壊す、terminate の後で受け口を片付ける、本体を手放さずに
+//   DLL を外す）。片付けた物に触らないか、この DLL のスレッドが残らないかを見る
 // --data-midi は VSTHost 1.58 のまねで、コントロールチェンジやプログラムチェンジも
 //   パラメータではなく DataEvent（システムエクスクルーシブ扱い）で、しかも 3 byte に
 //   詰めて渡す。付けない時と同じ音が出れば、そういうホストでも正しく鳴る
@@ -50,6 +52,7 @@
 // pointer to GetPluginFactory
 #if defined(_WIN32)
 #include <windows.h>
+#include <tlhelp32.h>
 #elif defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #elif defined(__linux__)
@@ -595,6 +598,129 @@ int run_automation(IPluginFactory *fac, const TUID cid, double rate, int block)
 	return bad ? 1 : 0;
 }
 
+// ---- FL Studio のまね（--fl）。FL で外すと落ち、開いたまま閉じると固まった（X での知らせ）。
+// FL は親の窓を先に壊し、terminate の後で自分の IComponentHandler を片付け、本体を手放さない
+// こともある。どれでも、片付けた物に触らず、この DLL のコードを走るスレッドを残さないかを見る
+
+// 片付けられた後に触られたら数える受け口
+class dying_handler : public IComponentHandler
+{
+public:
+	tresult PLUGIN_API queryInterface(const TUID, void **obj) override { touch(); *obj = this; return kResultOk; }
+	uint32 PLUGIN_API addRef() override  { touch(); return uint32(++refs); }
+	uint32 PLUGIN_API release() override { touch(); return uint32(--refs); }
+	tresult PLUGIN_API beginEdit(ParamID) override { touch(); return kResultOk; }
+	tresult PLUGIN_API performEdit(ParamID, ParamValue) override { touch(); return kResultOk; }
+	tresult PLUGIN_API endEdit(ParamID) override { touch(); return kResultOk; }
+	tresult PLUGIN_API restartComponent(int32) override { touch(); return kResultOk; }
+	void touch() { if (dead) after++; }
+	int refs = 1, after = 0;
+	bool dead = false;
+};
+
+// このプロセスのスレッドの数（Windows のみ。ほかは -1）
+int thread_count()
+{
+#if defined(_WIN32)
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return -1;
+	THREADENTRY32 te{};
+	te.dwSize = sizeof(te);
+	int n = 0;
+	const DWORD me = GetCurrentProcessId();
+	for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+		n += te.th32OwnerProcessID == me;
+	CloseHandle(snap);
+	return n;
+#else
+	return -1;
+#endif
+}
+
+int run_fl(IPluginFactory *fac, const TUID cid, double rate, int block, bool (*exit_dll)())
+{
+	std::printf("\n---- FL Studio のまね ----\n");
+	int bad = 0;
+
+	// 1. 挿して画面を出し、外す。親の窓を先に壊し、terminate の後で受け口を片付けてから手放す
+	{
+		instance in;
+		if (!make_instance(fac, cid, in)) { std::printf("NG: 作れない\n"); return 1; }
+		dying_handler h;
+		in.ctrl->setComponentHandler(&h);
+		start_instance(in, rate, block);
+		run_blocks(in, rate, block, 0.3, nullptr);
+		IPlugView *view = in.ctrl->createView(ViewType::kEditor);
+		std::unique_ptr<probe_host> host(probe_host_create());
+		ViewRect vr{};
+		if (view)
+			view->getSize(&vr);
+		if (view && host->create(vr.getWidth(), vr.getHeight()) && host->attach(view)) {
+			host->show();
+			host->pump(1);
+			host->destroy();            // 親の窓が先に消える
+		}
+		if (view)
+			view->removed();
+		in.proc->setProcessing(false);
+		in.comp->setActive(false);
+		in.comp->terminate();
+		in.ctrl->terminate();
+		h.dead = true;                  // ホストが受け口を片付けた
+		if (view)
+			view->release();
+		in.proc->release();
+		in.ctrl->release();
+		in.comp->release();
+		const bool ok = h.after == 0;
+		std::printf("%s: 外した後に片付けた受け口へ触った回数 %d\n", ok ? "OK" : "NG", h.after);
+		bad += !ok;
+	}
+
+	// 2. terminate したのに手放さない。この DLL のスレッド（スレーブ）が止まるか
+	instance leak1;
+	if (make_instance(fac, cid, leak1)) {
+		start_instance(leak1, rate, block);
+		run_blocks(leak1, rate, block, 0.3, nullptr);
+		const int during = thread_count();
+		leak1.proc->setProcessing(false);
+		leak1.comp->setActive(false);
+		leak1.comp->terminate();
+		sleep_ms(200);
+		const int after = thread_count();
+		const bool ok = during < 0 || after < during;
+		std::printf("%s: terminate でスレッドが %d → %d\n", ok ? "OK" : "NG", during, after);
+		bad += !ok;
+		// もう一度 initialize すれば元どおり鳴る
+		leak1.comp->initialize(nullptr);
+		start_instance(leak1, rate, block);
+		const int again = thread_count();
+		std::printf("%s: initialize し直すとスレッドが %d に戻る\n", again >= during || during < 0 ? "OK" : "NG", again);
+		bad += !(again >= during || during < 0);
+		leak1.proc->setProcessing(false);
+		leak1.comp->setActive(false);
+		leak1.comp->terminate();
+	}
+
+	// 3. terminate もせずに DLL を外す。ExitDll がスレッドを止めるか
+	instance leak2;
+	if (exit_dll && make_instance(fac, cid, leak2)) {
+		start_instance(leak2, rate, block);
+		run_blocks(leak2, rate, block, 0.3, nullptr);
+		leak2.proc->setProcessing(false);
+		const int during = thread_count();
+		exit_dll();
+		sleep_ms(200);
+		const int after = thread_count();
+		const bool ok = during < 0 || after < during;
+		std::printf("%s: ExitDll でスレッドが %d → %d\n", ok ? "OK" : "NG", during, after);
+		bad += !ok;
+	}
+	std::printf("---- FL Studio のまねはここまで: %s ----\n", bad ? "NG あり" : "全部よし");
+	return bad ? 1 : 0;
+}
+
 int run_torture(IPluginFactory *fac, const TUID cid)
 {
 	std::printf("\n---- 乱暴に扱ってみる ----\n");
@@ -1058,6 +1184,7 @@ int main(int argc, char **argv)
 	int block = 512;
 	double extra = 3.0;      // 曲の後ろに足す残響ぶん
 	bool torture = false;
+	bool fl = false;         // FL Studio の外し方のまね（run_fl）
 	bool adc_sine = false;
 	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
 	bool data_midi = false;  // VSTHost のまね。チャンネルメッセージも DataEvent で渡す
@@ -1072,6 +1199,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--block") && i + 1 < argc) block = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--tail") && i + 1 < argc) extra = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--torture")) torture = true;
+		else if (!std::strcmp(argv[i], "--fl")) fl = true;
 		else if (!std::strcmp(argv[i], "--adc-sine")) adc_sine = true;
 		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
 		else if (!std::strcmp(argv[i], "--data-midi")) data_midi = true;
@@ -1287,6 +1415,28 @@ int main(int argc, char **argv)
 		if (map)  map->release();
 		comp->release();
 		return run_torture(fac, cid);
+	}
+
+	if (fl) {
+		proc->setProcessing(false);
+		comp->setActive(false);
+		comp->terminate();
+		if (proc) proc->release();
+		if (ctrl) ctrl->release();
+		if (map)  map->release();
+		comp->release();
+		bool (*exit_dll)() = nullptr;
+#if defined(_WIN32)
+		exit_dll = reinterpret_cast<bool (*)()>(GetProcAddress(lib, "ExitDll"));
+#endif
+		const int r = run_fl(fac, cid, rate, block, exit_dll);
+#if defined(_WIN32)
+		// 手放されていない本体を残したまま DLL を外す。残ったスレッドが消えたコードを走れば、ここで落ちる
+		FreeLibrary(lib);
+		sleep_ms(1000);
+		std::printf("OK: 本体を残したまま DLL を外しても 1 秒落ちなかった\n");
+#endif
+		return r;
 	}
 
 	if (mid.empty() || wav.empty()) {

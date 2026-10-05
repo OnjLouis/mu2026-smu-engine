@@ -12,6 +12,7 @@
 // **同じ区間を何回も測って中央値を出す。** 1 回だけだと、ほかのアプリや
 // 周波数の上げ下げで数 % 揺れて、小さな改善が測れない。起動の直後の状態を
 // 保存しておき、毎回そこへ戻してから流すので、どの回も中身は同じ仕事になる。
+#include "compat/cli_text.h"
 #include "compat/platform.h"
 #include "compat/realtime.h"
 #include "mu2000.h"
@@ -48,8 +49,9 @@ struct run_result {
 
 int main(int argc, char **argv)
 {
+	smu2000::cli::init(argc, argv);       // -jp で日本語
 	if (argc < 4) {
-		std::fprintf(stderr, "blocktime <rom> <midi> <frames> [秒] [回数] [台数]\n");
+		std::fprintf(stderr, CLI_T("blocktime <rom> <midi> <frames> [seconds] [runs] [instances]\n", "blocktime <rom> <midi> <frames> [秒] [回数] [台数]\n"));
 		return 1;
 	}
 	const std::string dir = argv[1];
@@ -106,7 +108,7 @@ int main(int argc, char **argv)
 		more.push_back(std::move(m));
 	}
 	if (copies > 1)
-		std::printf("MU2000 を %d 台、同じ MIDI で同時に回す\n", copies);
+		std::printf(CLI_T("Running %d MU2000s at once on the same MIDI\n", "MU2000 を %d 台、同じ MIDI で同時に回す\n"), copies);
 
 	// perf_ticks() / perf_freq() are QueryPerformanceCounter and its frequency
 	// on Windows, and a monotonic nanosecond clock on macOS, so the measurement
@@ -118,7 +120,7 @@ int main(int argc, char **argv)
 	// 曲は繰り返す
 	const double loop_at = events.empty() ? 0.0 : events.back().time + 0.5;
 
-	std::printf("ブロック %d フレーム（%.2f ms ぶん）× %.0f 秒 を %d 回\n", block, span, seconds, repeats);
+	std::printf(CLI_T("Blocks of %d frames (%.2f ms) x %.0f s, %d runs\n", "ブロック %d フレーム（%.2f ms ぶん）× %.0f 秒 を %d 回\n"), block, span, seconds, repeats);
 
 	// **最初の十数秒は速く出る**（この機械では 13-25% 速く、約 14 秒で落ち着く）。
 	// 周波数か温度の都合で、鳴らし続けたときの速さは落ち着いた後のほう。
@@ -196,8 +198,8 @@ int main(int argc, char **argv)
 			r.sh2_share = double(mu.m_n_sh2) / n;
 			r.loops   = double(mu.m_loops) / n;
 		}
-		std::printf("  %s  平均 %.3f ms  最悪 %.2f  超過 %d  | CPU %.0f ns  SWP30 %.0f ns（うち MEG %.0f）  スレーブの MEG %.0f ns\n",
-		            warming ? "慣らし " : (std::to_string(rep + 1) + " 回目").c_str(),
+		std::printf(CLI_T("  %s  mean %.3f ms  worst %.2f  over %d  | CPU %.0f ns  SWP30 %.0f ns (MEG %.0f of it)  slave MEG %.0f ns\n", "  %s  平均 %.3f ms  最悪 %.2f  超過 %d  | CPU %.0f ns  SWP30 %.0f ns（うち MEG %.0f）  スレーブの MEG %.0f ns\n"),
+		            warming ? CLI_T("warm-up ", "慣らし ") : (std::to_string(rep + 1) + CLI_T("", " 回目")).c_str(),
 		            r.mean, r.worst, r.over, r.cpu_ns, r.swpm_ns, r.megm_ns, r.megs_ns);
 		std::fflush(stdout);
 		if (warming) {
@@ -224,32 +226,34 @@ int main(int argc, char **argv)
 	int over_max = 0;
 	for (const run_result &r : runs) over_max = std::max(over_max, r.over);
 
-	std::printf("中央値（%d 回。先に慣らしを %d 回捨てた）\n", repeats, warm);
-	std::printf("  平均 %.3f ms（回ごとの幅 %.1f%%）  中央 %.2f  95%% %.2f  99%% %.2f  最悪 %.2f ms\n",
+	std::printf(CLI_T("Median (%d runs, after %d warm-up runs were dropped)\n", "中央値（%d 回。先に慣らしを %d 回捨てた）\n"), repeats, warm);
+	std::printf(CLI_T("  mean %.3f ms (spread between runs %.1f%%)  median %.2f  95%% %.2f  99%% %.2f  worst %.2f ms\n", "  平均 %.3f ms（回ごとの幅 %.1f%%）  中央 %.2f  95%% %.2f  99%% %.2f  最悪 %.2f ms\n"),
 	            mean, spread(means), median(col(&run_result::mid)), median(col(&run_result::p95)),
 	            median(col(&run_result::p99)), median(col(&run_result::worst)));
-	std::printf("  実時間に対する割合: 平均 %.1f%%  最悪 %.0f%%%s\n",
+	std::printf(CLI_T("  share of real time: mean %.1f%%  worst %.0f%%%s\n", "  実時間に対する割合: 平均 %.1f%%  最悪 %.0f%%%s\n"),
 	            100.0 * mean / span, 100.0 * median(col(&run_result::worst)) / span,
-	            copies > 1 ? "（全部の台を合わせて）" : "");
+	            copies > 1 ? CLI_T(" (all instances together)", "（全部の台を合わせて）") : "");
 	if (copies > 1)
-		std::printf("  1 台あたり: 平均 %.1f%%  → この機械で実時間に入るのは %d 台まで\n",
+		std::printf(CLI_T("  per instance: mean %.1f%%  -> this machine fits %d in real time\n", "  1 台あたり: 平均 %.1f%%  → この機械で実時間に入るのは %d 台まで\n"),
 		            100.0 * mean / span / copies, int(span * copies / mean));
-	std::printf("  ブロックの長さを超えた回数: 多い回で %d / %zu\n", over_max, runs[0].blocks);
+	std::printf(CLI_T("  blocks that ran over their length: %d / %zu in the worst run\n", "  ブロックの長さを超えた回数: 多い回で %d / %zu\n"), over_max, runs[0].blocks);
 	if (mu.m_t_n) {
 		const std::vector<double> megm = col(&run_result::megm_ns);
-		std::printf("  1 サンプルあたり: CPU %.0f ns / SWP30 マスタ %.0f ns（うち MEG %.0f ns、幅 %.1f%%）"
-		            " / スレーブの MEG %.0f ns（別糸）\n",
+		std::printf(CLI_T("  per sample: CPU %.0f ns / SWP30 master %.0f ns (MEG %.0f ns of it, spread %.1f%%)"
+" / slave MEG %.0f ns (on its own thread)\n", "  1 サンプルあたり: CPU %.0f ns / SWP30 マスタ %.0f ns（うち MEG %.0f ns、幅 %.1f%%）"
+		            " / スレーブの MEG %.0f ns（別糸）\n"),
 		            median(col(&run_result::cpu_ns)), median(col(&run_result::swpm_ns)),
 		            median(megm), spread(megm), median(col(&run_result::megs_ns)));
-		std::printf("  実行ループ %.1f 周 / サンプル\n", median(col(&run_result::loops)));
+		std::printf(CLI_T("  run loop %.1f turns per sample\n", "  実行ループ %.1f 周 / サンプル\n"), median(col(&run_result::loops)));
 		// CPU の枠の中身。測るために時計を 3 対よけいに読むので、
 		// 足しても CPU の値とは一致しない（その差が時計の代金）
 		const double sh2 = median(col(&run_result::sh2_ns));
 		const double ndrv = median(col(&run_result::ndrv_ns));
 		const double nemisc = median(col(&run_result::nemisc_ns));
 		const double share = median(col(&run_result::sh2_share));
-		std::printf("    CPU の内訳: SH-2 %.0f ns（回したのは %.1f%% のサンプル）"
-		            " / native の tick %.0f ns / そのほかの面倒 %.0f ns / 時計と残り %.0f ns\n",
+		std::printf(CLI_T("    CPU split: SH-2 %.0f ns (ran for %.1f%% of the samples)"
+" / native tick %.0f ns / other upkeep %.0f ns / clock and the rest %.0f ns\n", "    CPU の内訳: SH-2 %.0f ns（回したのは %.1f%% のサンプル）"
+		            " / native の tick %.0f ns / そのほかの面倒 %.0f ns / 時計と残り %.0f ns\n"),
 		            sh2, 100.0 * share, ndrv, nemisc,
 		            median(col(&run_result::cpu_ns)) - sh2 - ndrv - nemisc);
 	}

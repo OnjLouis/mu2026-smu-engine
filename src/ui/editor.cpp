@@ -11,7 +11,7 @@
 // まだ読めていない値は「--」で出す（決め打ちの初期値は出さない）。
 
 #include "panel.h"
-#include "draw.h"
+#include "draw_imgui.h"
 #include "texts.h"
 #include "xg/ram.h"
 #include "xg_state.h"
@@ -108,8 +108,8 @@ bool panel::tick(bridge &br)
 	return true;
 }
 
-
-void panel::draw_knob(HDC dc, const spot &sp) const
+// A voice knob through an ImDrawList.
+void panel::draw_knob(ImDrawList *dl, const spot &sp) const
 {
 	// つまみの場所は「丸の中心 = 枠の上から 26、半径 18」と決めてある
 	const double PI = 3.14159265358979;
@@ -135,60 +135,62 @@ void panel::draw_knob(HDC dc, const spot &sp) const
 		int x1, y1, x2, y2;
 		at(deg, 1.18, x1, y1);
 		at(deg, 1.42, x2, y2);
-		line(dc, x1, y1, x2, y2, (i <= lit) ? ACCENT : RGB(66, 70, 76),
-		     std::max(1, int(2 * m_scale)));
+		im::line(dl, x1, y1, x2, y2, (i <= lit) ? ACCENT : RGB(66, 70, 76),
+		         std::max(1, int(2 * m_scale)));
 	}
 
-	disc(dc, cx, cy, r, RGB(52, 56, 62), RGB(88, 93, 100), std::max(1, int(m_scale)));
+	im::disc(dl, cx, cy, r, RGB(52, 56, 62), RGB(88, 93, 100), std::max(1, int(m_scale)));
 
 	// 読めていないうちは針を出さない
 	if (known) {
 		int px, py;
 		at(-135.0 + 270.0 * frac, 0.80, px, py);
-		line(dc, cx, cy, px, py, RGB(236, 240, 244), std::max(2, int(2.5 * m_scale)));
+		im::line(dl, cx, cy, px, py, RGB(236, 240, 244), std::max(2, int(2.5 * m_scale)));
 	}
 
 	RECT lab{ sp.r.left, sp.r.top + int(44 * m_scale),
 	          sp.r.right, sp.r.top + int(55 * m_scale) };
-	text_in(dc, lab, sp.label, TEXT_DIM, m_font_small, DT_CENTER | DT_TOP | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(lab), im::size_of(lab), sp.label, TEXT_DIM,
+	            m_fonts.small, m_fonts.small_px, true, false, false);
 
 	const std::string num = (known && p) ? xg::format(*p, v) : "--";
 	RECT val{ sp.r.left, sp.r.top + int(54 * m_scale),
 	          sp.r.right, sp.r.top + int(66 * m_scale) };
-	text_in(dc, val, num.c_str(), known ? TEXT : TEXT_DIM, m_font_small,
-	        DT_CENTER | DT_TOP | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(val), im::size_of(val), num.c_str(), known ? TEXT : TEXT_DIM,
+	            m_fonts.small, m_fonts.small_px, true, false, false);
 }
 
-
-void panel::paint_editor(HDC dc, const char *status) const
+// editor page through ui/draw_imgui.h.
+void panel::paint_editor(ImDrawList *dl, const char *status) const
 {
 	RECT all{ 0, 0, m_w, m_h };
-	fill(dc, all, BODY);
+	im::fill(dl, all, BODY);
 	RECT top{ 0, 0, m_w, m_oy + int(24 * m_scale) };
-	fill(dc, top, BODY_TOP);
+	im::fill(dl, top, BODY_TOP);
 
 	// パート
 	RECT lab = scale(26, 26, 120, 16);
-	text_in(dc, lab, "PART", TEXT_DIM, m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(lab), im::size_of(lab), "PART", TEXT_DIM,
+	            m_fonts.small, m_fonts.small_px);
 
 	for (const spot &sp : m_spots) {
 		switch (sp.kind) {
 		case spot_kind::part: {
 			const bool on = (sp.ctl - CTL_PART) == m_part;
-			round_box(dc, sp.r, on ? ACCENT : BTN_FACE, BTN_EDGE, int(4 * m_scale));
+			im::round_box(dl, sp.r, on ? ACCENT : BTN_FACE, BTN_EDGE, float(4 * m_scale));
 			char n[8];
 			std::snprintf(n, sizeof(n), "%d", sp.ctl - CTL_PART + 1);
-			text_in(dc, sp.r, n, on ? RGB(18, 26, 12) : TEXT, m_font_small,
-			        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			im::text_in(dl, im::pos_of(sp.r), im::size_of(sp.r), n, on ? RGB(18, 26, 12) : TEXT,
+			            m_fonts.small, m_fonts.small_px, true, true, false);
 			break;
 		}
 		case spot_kind::knob:
-			draw_knob(dc, sp);
+			draw_knob(dl, sp);
 			break;
 		case spot_kind::action:
-			round_box(dc, sp.r, BTN_FACE, BTN_EDGE, int(5 * m_scale));
-			text_in(dc, sp.r, sp.label, TEXT, m_font_small,
-			        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			im::round_box(dl, sp.r, BTN_FACE, BTN_EDGE, float(5 * m_scale));
+			im::text_in(dl, im::pos_of(sp.r), im::size_of(sp.r), sp.label, TEXT,
+			            m_fonts.small, m_fonts.small_px, true, true, false);
 			break;
 		default:
 			break;
@@ -207,19 +209,21 @@ void panel::paint_editor(HDC dc, const char *status) const
 	              show("part.bank_msb").c_str(), show("part.bank_lsb").c_str(),
 	              show("part.program").c_str(), show("part.rcv_channel").c_str());
 	RECT info = scale(26, 200, 290, 36);
-	text_in(dc, info, line1, TEXT, m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
+	im::text_in(dl, im::pos_of(info), im::size_of(info), line1, TEXT,
+	            m_fonts.small, m_fonts.small_px, false, false, true);
 
 	RECT hint = scale(26, 288, 290, 60);
-	text_in(dc, hint, UI_TEXT(editor_hint, "Drag knobs up/down, or use the wheel.\n"
-                           "Sends XG parameter changes.\n"
-                           "Values are read back from the MU2000."),
-	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
+	im::text_in(dl, im::pos_of(hint), im::size_of(hint),
+	            UI_TEXT(editor_hint, "Drag knobs up/down, or use the wheel.\n"
+	                                  "Sends XG parameter changes.\n"
+	                                  "Values are read back from the MU2000."),
+	            RGB(104, 109, 116), m_fonts.small, m_fonts.small_px, false, false, true);
 
 	if (status && status[0])
-		text_in(dc, m_status, status, TEXT_DIM, m_font_small,
-		        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+		im::text_in(dl, im::pos_of(m_status), im::size_of(m_status), status,
+		            TEXT_DIM, m_fonts.small, m_fonts.small_px, false, true, false);
 
-	draw_tabs(dc);
+	draw_tabs(dl);
 }
 
 

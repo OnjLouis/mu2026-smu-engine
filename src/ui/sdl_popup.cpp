@@ -2,10 +2,11 @@
 
 #include "sdl_popup.h"
 
-#include <cairo/cairo.h>
+#include "ui/imgui_shell_sdl.h"
+#include "ui/rom_locate.h"
+#include "ui/texts.h"
 
 #include <algorithm>
-#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -16,198 +17,7 @@ namespace {
 
 constexpr int ROW_H = 26, PAD_X = 12, GUTTER = 22;
 
-void paint(cairo_t *cr, const std::vector<item> &items, int px, int py, int w, int hover)
-{
-	cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL,
-	                       CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(cr, 14.0);
-	const int h = int(items.size()) * ROW_H + 12;
-	// Dim the panel behind the menu.
-	cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-	cairo_paint(cr);
-	// Box.
-	cairo_set_source_rgb(cr, 0.16, 0.16, 0.17);
-	cairo_rectangle(cr, px, py, w, h);
-	cairo_fill(cr);
-	cairo_set_source_rgb(cr, 0.55, 0.55, 0.58);
-	cairo_set_line_width(cr, 1);
-	cairo_rectangle(cr, px + 0.5, py + 0.5, w - 1, h - 1);
-	cairo_stroke(cr);
-
-	for (size_t i = 0; i < items.size(); i++) {
-		const int ry = py + 6 + int(i) * ROW_H;
-		const item &it = items[i];
-		if (it.separator) {
-			cairo_set_source_rgb(cr, 0.4, 0.4, 0.42);
-			cairo_move_to(cr, px + 8, ry + ROW_H / 2);
-			cairo_line_to(cr, px + w - 8, ry + ROW_H / 2);
-			cairo_stroke(cr);
-			continue;
-		}
-		if (int(i) == hover && it.enabled) {
-			cairo_set_source_rgb(cr, 0.25, 0.45, 0.75);
-			cairo_rectangle(cr, px + 3, ry, w - 6, ROW_H);
-			cairo_fill(cr);
-		}
-		cairo_set_source_rgb(cr, it.enabled ? 0.92 : 0.5, it.enabled ? 0.92 : 0.5,
-		                     it.enabled ? 0.92 : 0.5);
-		cairo_move_to(cr, px + PAD_X + GUTTER, ry + 17);
-		std::string text = it.label;
-		if (it.submenu)
-			text += "  >";
-		cairo_show_text(cr, text.c_str());
-		if (it.checked) {
-			// A filled square: font glyphs for checks are hit and miss
-			// across sans-serif faces (Noto Sans has neither ✓ nor ●).
-			cairo_rectangle(cr, px + PAD_X + 2, ry + ROW_H / 2 - 4, 8, 8);
-			cairo_fill(cr);
-		}
-	}
-}
-
-int width_for(cairo_t *cr, const std::vector<item> &items)
-{
-	cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL,
-	                       CAIRO_FONT_WEIGHT_NORMAL);
-	cairo_set_font_size(cr, 14.0);
-	double w = 0;
-	for (const item &it : items) {
-		if (it.separator)
-			continue;
-		cairo_text_extents_t ex{};
-		const std::string t = it.submenu ? it.label + "  >" : it.label;
-		cairo_text_extents(cr, t.c_str(), &ex);
-		w = std::max(w, ex.x_advance);
-	}
-	return int(w) + PAD_X * 2 + GUTTER + 16;
-}
-
 } // namespace
-
-int run(SDL_Window *win, SDL_Renderer *ren, SDL_Texture *tex, void *bits,
-        int ww, int wh, std::function<void()> behind, std::atomic<bool> &quit,
-        const std::vector<item> &items, int x, int y, int &sub_chosen)
-{
-	(void)win;
-	sub_chosen = -1;
-	cairo_surface_t *ms = cairo_image_surface_create(CAIRO_FORMAT_A8, 8, 8);
-	cairo_t *mc = cairo_create(ms);
-	const int w = width_for(mc, items);
-	const int h = int(items.size()) * ROW_H + 12;
-	cairo_destroy(mc);
-	cairo_surface_destroy(ms);
-	x = std::clamp(x, 0, std::max(0, ww - w));
-	y = std::clamp(y, 0, std::max(0, wh - h));
-
-	int hover = -1;
-	auto repaint = [&] {
-		behind();
-		cairo_surface_t *surf = cairo_image_surface_create_for_data(
-		    static_cast<unsigned char *>(bits), CAIRO_FORMAT_ARGB32, ww, wh, ww * 4);
-		cairo_t *cr = cairo_create(surf);
-		paint(cr, items, x, y, w, hover);
-		cairo_destroy(cr);
-		cairo_surface_destroy(surf);
-		if (ren && tex) {
-			SDL_UpdateTexture(tex, nullptr, bits, ww * 4);
-			SDL_RenderTexture(ren, tex, nullptr, nullptr);
-			SDL_RenderPresent(ren);
-		}
-	};
-	auto at = [&](int mx, int my) {
-		if (mx < x || mx >= x + w || my < y)
-			return -1;
-		const int i = (my - y - 6) / ROW_H;
-		if (i < 0 || i >= int(items.size()))
-			return -1;
-		return i;
-	};
-
-	repaint();
-	while (!quit.load()) {
-		SDL_Event ev;
-		if (!SDL_WaitEventTimeout(&ev, 30))
-			continue;
-		// Only this window's events. The plug-in shares the queue with its
-		// PC windows and the host may share the process.
-		if (ev.type != SDL_EVENT_QUIT) {
-			Uint32 id = 0;
-			switch (ev.type) {
-			case SDL_EVENT_MOUSE_MOTION:      id = ev.motion.windowID; break;
-			case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			case SDL_EVENT_MOUSE_BUTTON_UP:   id = ev.button.windowID; break;
-			case SDL_EVENT_MOUSE_WHEEL:       id = ev.wheel.windowID; break;
-			case SDL_EVENT_KEY_DOWN:
-			case SDL_EVENT_KEY_UP:            id = ev.key.windowID; break;
-			case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-			case SDL_EVENT_WINDOW_RESIZED:
-			case SDL_EVENT_WINDOW_FOCUS_LOST: id = ev.window.windowID; break;
-			default: break;
-			}
-			Uint32 me = win ? SDL_GetWindowID(win) : 0;
-			if (id && me && id != me)
-				continue;
-		}
-		switch (ev.type) {
-		case SDL_EVENT_QUIT:
-			quit.store(true);
-			return -1;
-		case SDL_EVENT_MOUSE_MOTION: {
-			const int i = at(int(ev.motion.x), int(ev.motion.y));
-			const int h = (i >= 0 && !items[size_t(i)].separator) ? i : -1;
-			if (h != hover) {
-				hover = h;
-				repaint();
-			}
-			break;
-		}
-		case SDL_EVENT_MOUSE_BUTTON_DOWN:
-			if (ev.button.button == SDL_BUTTON_RIGHT)
-				return -1;
-			if (ev.button.button == SDL_BUTTON_LEFT) {
-				const int i = at(int(ev.button.x), int(ev.button.y));
-				if (i < 0)
-					return -1;   // clicked outside: cancel
-				const item &it = items[size_t(i)];
-				if (!it.enabled || it.separator)
-					break;
-				if (it.submenu) {
-					sub_chosen = it.sub;
-					return it.id;
-				}
-				return it.id;
-			}
-			break;
-		case SDL_EVENT_KEY_DOWN:
-			if (ev.key.key == SDLK_ESCAPE)
-				return -1;
-			if (ev.key.key == SDLK_UP || ev.key.key == SDLK_DOWN) {
-				const int d = ev.key.key == SDLK_DOWN ? 1 : -1;
-				int i = hover;
-				for (size_t k = 0; k < items.size(); k++) {
-					i = (i + d + int(items.size())) % int(items.size());
-					if (!items[size_t(i)].separator && items[size_t(i)].enabled)
-						break;
-				}
-				hover = i;
-				repaint();
-			} else if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
-				if (hover >= 0 && items[size_t(hover)].enabled &&
-				    !items[size_t(hover)].separator) {
-					if (items[size_t(hover)].submenu) {
-						sub_chosen = items[size_t(hover)].sub;
-						return items[size_t(hover)].id;
-					}
-					return items[size_t(hover)].id;
-				}
-			}
-			break;
-		default:
-			break;
-		}
-	}
-	return -1;
-}
 
 struct dialog_state {
 	std::atomic<bool> done{ false };
@@ -286,6 +96,190 @@ int message_box(SDL_Window *win, const char *title, const char *text,
 	return id;
 }
 
+// The menu through an ImDrawList. Same geometry, colors, hit-testing,
+// keyboard and cancel semantics on every platform.
+int run(SDL_Window *win, imshell::sdl_state &st, ImGuiContext *ctx,
+              const im::fonts &fonts, int ww, int wh,
+              std::function<void(ImDrawList *)> behind, std::atomic<bool> &quit,
+              const std::vector<item> &items, int x, int y, int &sub_chosen)
+{
+	sub_chosen = -1;
+	if (!ctx || !st.ctx)
+		return -1;
+	ImGui::SetCurrentContext(ctx);
+
+	ImFont *font = fonts.label;
+	const float px = fonts.label_px;
+	// Measured before the first NewFrame (no current font yet), so use an
+	// explicit atlas font; build it if nothing rendered yet.
+	ImFont *measure = font;
+	if (!measure) {
+		ImGuiIO &mio = ImGui::GetIO();
+		if (!mio.Fonts->IsBuilt())
+			mio.Fonts->Build();
+		if (!mio.Fonts->Fonts.empty())
+			measure = mio.Fonts->Fonts[0];
+	}
+	auto text_w = [&](const std::string &t) {
+		if (measure)
+			return measure->CalcTextSizeA(px, FLT_MAX, 0.0f, t.c_str()).x;
+		return float(t.size()) * 8.0f;
+	};
+	double w = 0;
+	for (const item &it : items) {
+		if (it.separator)
+			continue;
+		w = std::max(w, double(text_w(it.submenu ? it.label + "  >" : it.label)));
+	}
+	const int mw = int(w) + PAD_X * 2 + GUTTER + 16;
+	const int mh = int(items.size()) * ROW_H + 12;
+	x = std::clamp(x, 0, std::max(0, ww - mw));
+	y = std::clamp(y, 0, std::max(0, wh - mh));
+
+	const ImU32 col_dim    = IM_COL32(0, 0, 0, 89);       // 0.35 alpha
+	const ImU32 col_box    = IM_COL32(41, 41, 43, 255);
+	const ImU32 col_edge   = IM_COL32(140, 140, 148, 255);
+	const ImU32 col_hover  = IM_COL32(64, 115, 191, 255);
+	const ImU32 col_text   = IM_COL32(235, 235, 235, 255);
+	const ImU32 col_dis    = IM_COL32(128, 128, 128, 255);
+	const ImU32 col_check  = IM_COL32(235, 235, 235, 255);
+
+	int hover = -1;
+	auto repaint = [&] {
+		imshell::sdl_begin(ctx);
+		behind(ImGui::GetBackgroundDrawList());
+		ImDrawList *dl = ImGui::GetForegroundDrawList();
+		// Dim the panel behind the menu.
+		dl->AddRectFilled(ImVec2(0, 0), ImVec2(float(ww), float(wh)), col_dim);
+		// Box.
+		dl->AddRectFilled(ImVec2(float(x), float(y)),
+		                  ImVec2(float(x + mw), float(y + mh)), col_box);
+		dl->AddRect(ImVec2(float(x) + 0.5f, float(y) + 0.5f),
+		            ImVec2(float(x + mw) - 1.0f, float(y + mh) - 1.0f), col_edge);
+		for (size_t i = 0; i < items.size(); i++) {
+			const int ry = y + 6 + int(i) * ROW_H;
+			const item &it = items[i];
+			if (it.separator) {
+				dl->AddLine(ImVec2(float(x + 8), float(ry + ROW_H / 2)),
+				            ImVec2(float(x + mw - 8), float(ry + ROW_H / 2)), col_edge);
+				continue;
+			}
+			if (int(i) == hover && it.enabled)
+				dl->AddRectFilled(ImVec2(float(x + 3), float(ry)),
+				                  ImVec2(float(x + mw - 3), float(ry + ROW_H)), col_hover);
+			std::string text = it.label;
+			if (it.submenu)
+				text += "  >";
+			const ImU32 tc = it.enabled ? col_text : col_dis;
+			if (font)
+				dl->AddText(font, px,
+				            ImVec2(float(x + PAD_X + GUTTER), float(ry + ROW_H / 2) - px * 0.5f),
+				            tc, text.c_str());
+			else
+				dl->AddText(ImVec2(float(x + PAD_X + GUTTER), float(ry + 5)), tc,
+				            text.c_str());
+			if (it.checked)
+				dl->AddRectFilled(
+				    ImVec2(float(x + PAD_X + 2), float(ry + ROW_H / 2 - 4)),
+				    ImVec2(float(x + PAD_X + 10), float(ry + ROW_H / 2 + 4)), col_check);
+		}
+		imshell::sdl_present(st, win);
+	};
+	auto at = [&](int mx, int my) {
+		if (mx < x || mx >= x + mw || my < y)
+			return -1;
+		const int i = (my - y - 6) / ROW_H;
+		if (i < 0 || i >= int(items.size()))
+			return -1;
+		return i;
+	};
+	auto choose = [&](int i) {
+		if (i < 0 || !items[size_t(i)].enabled || items[size_t(i)].separator)
+			return -1;
+		if (items[size_t(i)].submenu)
+			sub_chosen = items[size_t(i)].sub;
+		return items[size_t(i)].id;
+	};
+
+	repaint();
+	while (!quit.load()) {
+		SDL_Event ev;
+		if (!SDL_WaitEventTimeout(&ev, 30))
+			continue;
+		ImGui_ImplSDL3_ProcessEvent(&ev);
+		// Only this window's events. The plug-in shares the queue with its
+		// PC windows and the host may share the process.
+		if (ev.type != SDL_EVENT_QUIT) {
+			Uint32 id = 0;
+			switch (ev.type) {
+			case SDL_EVENT_MOUSE_MOTION:      id = ev.motion.windowID; break;
+			case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			case SDL_EVENT_MOUSE_BUTTON_UP:   id = ev.button.windowID; break;
+			case SDL_EVENT_MOUSE_WHEEL:       id = ev.wheel.windowID; break;
+			case SDL_EVENT_KEY_DOWN:
+			case SDL_EVENT_KEY_UP:            id = ev.key.windowID; break;
+			case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+			case SDL_EVENT_WINDOW_RESIZED:
+			case SDL_EVENT_WINDOW_FOCUS_LOST: id = ev.window.windowID; break;
+			default: break;
+			}
+			Uint32 me = win ? SDL_GetWindowID(win) : 0;
+			if (id && me && id != me)
+				continue;
+		}
+		switch (ev.type) {
+		case SDL_EVENT_QUIT:
+			quit.store(true);
+			return -1;
+		case SDL_EVENT_MOUSE_MOTION: {
+			const int i = at(int(ev.motion.x), int(ev.motion.y));
+			const int h = (i >= 0 && !items[size_t(i)].separator) ? i : -1;
+			if (h != hover) {
+				hover = h;
+				repaint();
+			}
+			break;
+		}
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			if (ev.button.button == SDL_BUTTON_RIGHT)
+				return -1;
+			if (ev.button.button == SDL_BUTTON_LEFT) {
+				const int i = at(int(ev.button.x), int(ev.button.y));
+				if (i < 0)
+					return -1;   // clicked outside: cancel
+				const int id = choose(i);
+				if (id >= 0 || items[size_t(i)].submenu)
+					return id;
+			}
+			break;
+		case SDL_EVENT_KEY_DOWN:
+			if (ev.key.key == SDLK_ESCAPE)
+				return -1;
+			if (ev.key.key == SDLK_UP || ev.key.key == SDLK_DOWN) {
+				const int d = ev.key.key == SDLK_DOWN ? 1 : -1;
+				int i = hover;
+				for (size_t k = 0; k < items.size(); k++) {
+					i = (i + d + int(items.size())) % int(items.size());
+					if (!items[size_t(i)].separator && items[size_t(i)].enabled)
+						break;
+				}
+				hover = i;
+				repaint();
+			} else if (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER) {
+				if (hover >= 0) {
+					const int id = choose(hover);
+					if (id >= 0 || items[size_t(hover)].submenu)
+						return id;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}
+	return -1;
+}
+
 void alert(SDL_Window *win, const char *title, const std::string &text)
 {
 	message_box(win, title, text.c_str(), SDL_MESSAGEBOX_WARNING,
@@ -305,4 +299,31 @@ bool confirm(SDL_Window *win, const char *title, const std::string &text,
 }
 
 } // namespace sdl_popup
+
+// ROM の場所なしで起動したとき（ui/rom_locate.h）。窓はまだ無いので、SDL の映像だけ起こして
+// 案内のメッセージと、フォルダを選ぶ窓（xdg-desktop-portal か zenity。無ければ選べない）を出す
+bool ask_roms_folder(const std::string &message, std::string &picked)
+{
+	if (!SDL_Init(SDL_INIT_VIDEO))
+		return false;
+	const SDL_MessageBoxButtonData buttons[] = {
+		{ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, UI_TEXT(dlg_roms_quit, "Quit") },
+		{ SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, UI_TEXT(dlg_roms_pick, "Select ROM folder...") },
+	};
+	if (sdl_popup::message_box(nullptr, "S-MU2000", message.c_str(), SDL_MESSAGEBOX_INFORMATION,
+	                           { buttons[0], buttons[1] }) != 1)
+		return false;
+	auto *held = new std::shared_ptr<sdl_popup::dialog_state>(std::make_shared<sdl_popup::dialog_state>());
+	std::shared_ptr<sdl_popup::dialog_state> st = *held;
+	SDL_ShowOpenFolderDialog(sdl_popup::dialog_done, held, nullptr, nullptr, false);
+	while (!st->done.load()) {
+		SDL_Event ev;
+		if (SDL_WaitEventTimeout(&ev, 50) && ev.type == SDL_EVENT_QUIT)
+			return false;
+	}
+	std::lock_guard<std::mutex> hold(st->mutex);
+	picked = st->path;
+	return !picked.empty();
+}
+
 } // namespace ui

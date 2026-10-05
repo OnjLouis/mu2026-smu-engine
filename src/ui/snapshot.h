@@ -44,6 +44,7 @@ struct snapshot {
 	char message[96] = {};       // 起動中／ROM が無い等。空なら出さない
 	// 鳴っている声の数（SWP30 のマスタとスレーブ、それぞれ 64 スロット）
 	u8   voices_master = 0, voices_slave = 0;
+	bool card = false;           // 前面の差し込み口に SmartMedia が差さっている（パネルに絵を出す）
 };
 
 // XG の値の写し。音声の糸が firmware のワーク RAM から 25ms ごとに写す（xg/ram.h）。

@@ -2,8 +2,6 @@
 //
 // The Windows front end's app: ui::app answering the Win32 window (ui/
 // window_win.cpp). gui.cpp keeps main(); the Mac's twin is ui/app_mac.h.
-// Unlike the Mac, the Win32 headers tolerate the GDI shim, so this class
-// can be a plain C++ header.
 
 #ifndef S_MU2000_UI_APP_WIN_H
 #define S_MU2000_UI_APP_WIN_H
@@ -36,10 +34,22 @@ public:
 	    : app(b, mi, tha, thb, muo) {}
 
 	HWND hwnd = nullptr;             // set at WM_CREATE, for message boxes
-	// Double buffering: repainting straight into the window would flicker
-	HDC     mem_dc = nullptr;
-	HBITMAP mem_bmp = nullptr;
-	int     mem_w = 0, mem_h = 0;
+	// 描画の外で行う仕事（app::defer_outside_paint）。WM_APP_DEFERRED を受けた wnd_proc が実行する
+	static constexpr UINT WM_APP_DEFERRED = WM_APP + 0x31;
+	std::vector<std::function<void()>> deferred_win;
+	void defer_outside_paint(std::function<void()> f) override
+	{
+		deferred_win.push_back(std::move(f));
+		if (hwnd)
+			PostMessageW(hwnd, WM_APP_DEFERRED, 0, 0);
+	}
+	void run_deferred_win()
+	{
+		std::vector<std::function<void()>> todo;
+		todo.swap(deferred_win);
+		for (auto &f : todo)
+			f();
+	}
 	// Choosing from a menu failed: shown at the end of the command
 	std::string last_error;
 

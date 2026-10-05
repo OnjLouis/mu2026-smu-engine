@@ -8,9 +8,10 @@
 // VST3 build shows and the *same* view the AUv3 puts in its view controller
 // (src/auv3/view_controller.mm). All this file does is the AUv2 way of asking.
 //
-// Objective-C++ for the same reason view_mac.mm is: compat/gdi.h and Cocoa both
-// define BOOL, and Quickdraw defines Polygon, so the drawing layer is reached
-// only through panel_nsview.h and never included here.
+// Objective-C++ for the same reason view_mac.mm is: the panel's headers reach
+// compat/gdi.h, whose non-Windows types have no business in a Cocoa
+// translation unit, so they are reached only through panel_nsview.h and never
+// included here.
 
 #import <Cocoa/Cocoa.h>
 

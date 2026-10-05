@@ -10,11 +10,22 @@
 #include "ui/keymap_win.h"
 #include "ui/pc_host.h"
 
+#include "ui/imgui_shell.h"
+
+#include "imgui.h"
+#include "backends/imgui_impl_win32.h"
+
+#include "ui/rom_locate.h"
+
+#include <cstdio>
 #include <windowsx.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <cmath>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace ui {
 
@@ -81,6 +92,17 @@ void constrain_sizing(HWND hwnd, WPARAM edge, RECT &r)
 		r.bottom = r.top + outer_h;
 }
 
+imshell::dx11_state g_im{};
+
+void win_imgui_frame(HWND hwnd)
+{
+	RECT cr;
+	GetClientRect(hwnd, &cr);
+	imshell::dx11_paint(g_im, cr.right, cr.bottom, [&](ImDrawList *dl) {
+		g_win->paint_main(dl, g_im.fonts, cr.right);
+	});
+}
+
 } // namespace
 
 // Menu command numbers, labels and builders are shared with gui_mac.cpp
@@ -131,32 +153,30 @@ void track_menu_at(HWND hwnd, int mx, int my)
 	win_track_menu(hwnd, pt, g_win->context_menu(mx, my));
 }
 
-void ensure_backing(HDC dc, int w, int h)
-{
-	if (g_win->mem_dc && g_win->mem_w == w && g_win->mem_h == h)
-		return;
-	if (g_win->mem_bmp) DeleteObject(g_win->mem_bmp);
-	if (g_win->mem_dc)  DeleteDC(g_win->mem_dc);
-	g_win->mem_dc = CreateCompatibleDC(dc);
-	g_win->mem_bmp = CreateCompatibleBitmap(dc, w, h);
-	SelectObject(g_win->mem_dc, g_win->mem_bmp);
-	g_win->mem_w = w;
-	g_win->mem_h = h;
-}
-
 LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+	if (g_im.imgui) {
+		ImGui::SetCurrentContext(g_im.imgui);
+		// Editor windows skip WM_CHAR outside text boxes (pc_window.cpp);
+		// the panel takes keys directly, so every key stays shared.
+		ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
+	}
 	switch (msg) {
 	case WM_CREATE:
 		g_win->hwnd = hwnd;
 		SetTimer(hwnd, 1, 33, nullptr);        // 30 コマ／秒で描き直す
+		if (!imshell::dx11_start(g_im, hwnd)) {
+			MessageBoxA(hwnd, "Cannot use Direct3D 11", "S-MU2000",
+			            MB_OK | MB_ICONERROR);
+			return -1;
+		}
+		// The context is up and no frame is open, so the panel can build its
+		// fonts now (see panel::fonts_ready)
+		g_win->panel.fonts_ready();
 		return 0;
 
 	case WM_TIMER: {
-		// The timer half is shared (ui::app::frame_work); painting waits
-		// for the invalidate, like every other platform work item here
-		g_win->frame_work();
-		InvalidateRect(hwnd, nullptr, FALSE);
+		win_imgui_frame(hwnd);   // timer work runs inside paint_main
 		return 0;
 	}
 
@@ -179,8 +199,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 
 	case WM_SIZE:
+		g_im.resize_w = LOWORD(lp);
+		g_im.resize_h = HIWORD(lp);
 		g_win->resized(LOWORD(lp), HIWORD(lp));
-		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 
 	case WM_SIZING:
@@ -191,17 +212,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		return 1;                               // 全部自分で描く
 
 	case WM_PAINT: {
-		PAINTSTRUCT ps;
-		HDC dc = BeginPaint(hwnd, &ps);
-		RECT cr;
-		GetClientRect(hwnd, &cr);
-		const int w = cr.right, h = cr.bottom;
-		ensure_backing(dc, w, h);
-
-		// The wait/drop fragment is what WASAPI measures (ui/status.h)
-		g_win->paint_frame(g_win->mem_dc, w);
-
-		BitBlt(dc, 0, 0, w, h, g_win->mem_dc, 0, 0, SRCCOPY);
+		PAINTSTRUCT ps;   // Direct3D が出す。validate のためだけに閉じる
+		BeginPaint(hwnd, &ps);
 		EndPaint(hwnd, &ps);
 		return 0;
 	}
@@ -226,6 +238,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		track_menu_at(hwnd, mx, my);
 		return 0;
 	}
+
+	case win_app::WM_APP_DEFERRED:
+		// 描画の外で行う仕事（app::defer_outside_paint。録音デバイスの選び直しなど）
+		g_win->run_deferred_win();
+		InvalidateRect(hwnd, nullptr, FALSE);
+		return 0;
 
 	case WM_COMMAND: {
 		const UINT id = LOWORD(wp);
@@ -290,10 +308,46 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 
 	case WM_DESTROY:
+		imshell::dx11_stop(g_im);
 		PostQuitMessage(0);
 		return 0;
 	}
 	return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+// ROM の場所なしで起動したとき（ui/rom_locate.h）。窓を作る前なので、案内（MessageBox）と
+// 「フォルダーの参照」の窓（SHBrowseForFolder）を出す。文字は UTF-8 から wide に
+bool ask_roms_folder(const std::string &message, std::string &picked)
+{
+	auto wide = [](const std::string &s) {
+		std::wstring w(size_t(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0)), L'\0');
+		if (!w.empty()) {
+			MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), int(w.size()));
+			w.pop_back();   // 終わりの 0
+		}
+		return w;
+	};
+	std::string text = message;
+	text += "\n\n";
+	text += UI_TEXT(dlg_roms_ok_cancel, "OK: choose the folder.  Cancel: quit.");
+	if (MessageBoxW(nullptr, wide(text).c_str(), L"S-MU2000", MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
+		return false;
+	const bool com = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+	const std::wstring title = wide(UI_TEXT(dlg_roms_pick, "Select ROM folder..."));
+	BROWSEINFOW bi{};
+	bi.lpszTitle = title.c_str();
+	bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+	PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&bi);
+	wchar_t path[MAX_PATH * 4] = {};
+	const bool got = id && SHGetPathFromIDListW(id, path);
+	if (id)
+		CoTaskMemFree(id);
+	if (com)
+		CoUninitialize();
+	if (!got)
+		return false;
+	picked = to_utf8(path);
+	return !picked.empty();
 }
 
 } // namespace ui

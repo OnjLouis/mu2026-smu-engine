@@ -47,6 +47,10 @@ int port_from_track_name(const std::string &name);
 // format 0/1 に対応。テンポ変化は追う。SMPTE 単位には未対応
 bool load(const std::string &path, std::vector<event> &out, std::string &err);
 
+// メモリ上の SMF を開く（wasm 用。load(path) と同じものを返す）。
+// data/size はファイルの中身そのまま。
+bool load_from_memory(const u8 *data, size_t size, std::vector<event> &out, std::string &err);
+
 } // namespace smf
 
 #endif // S_MU2000_SMF_H

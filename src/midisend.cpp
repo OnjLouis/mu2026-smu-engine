@@ -8,6 +8,7 @@
 // live を端から端まで試すための道具。loopMIDI などを間に挟んで、
 // これで流したものが live で鳴るかを確かめる。
 
+#include "compat/cli_text.h"
 #include "smf.h"
 
 #include <cstdio>
@@ -24,14 +25,14 @@ namespace {
 void list_outputs()
 {
 	const UINT n = midiOutGetNumDevs();
-	std::printf("MIDI 出力:\n");
+	std::printf(CLI_T("MIDI outputs:\n", "MIDI 出力:\n"));
 	for (UINT i = 0; i < n; i++) {
 		MIDIOUTCAPSA caps{};
 		if (midiOutGetDevCapsA(i, &caps, sizeof(caps)) == MMSYSERR_NOERROR)
 			std::printf("  %u: %s\n", i, caps.szPname);
 	}
 	if (!n)
-		std::printf("  （なし）\n");
+		std::printf(CLI_T("  (none)\n", "  （なし）\n"));
 }
 
 } // namespace
@@ -39,6 +40,7 @@ void list_outputs()
 
 int main(int argc, char **argv)
 {
+	smu2000::cli::init(argc, argv);       // -jp で日本語
 	std::string path;
 	int port = 0;
 
@@ -48,8 +50,9 @@ int main(int argc, char **argv)
 		else if (path.empty()) path = argv[i];
 	}
 	if (path.empty()) {
-		std::fprintf(stderr, "使い方: midisend <MIDI ファイル> [--port 番号]\n"
-		                     "        midisend --list\n");
+		std::fprintf(stderr, CLI_T("Usage: midisend <MIDI file> [--port number]\n"
+"        midisend --list\n", "使い方: midisend <MIDI ファイル> [--port 番号]\n"
+		                     "        midisend --list\n"));
 		return 1;
 	}
 
@@ -59,17 +62,17 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "%s\n", err.c_str());
 		return 1;
 	}
-	std::printf("%zu イベント、最後は %.2f 秒\n",
+	std::printf(CLI_T("%zu events, the last at %.2f s\n", "%zu イベント、最後は %.2f 秒\n"),
 	            events.size(), events.empty() ? 0.0 : events.back().time);
 
 	HMIDIOUT out = nullptr;
 	if (midiOutOpen(&out, UINT(port), 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-		std::fprintf(stderr, "MIDI 出力 %d を開けない\n", port);
+		std::fprintf(stderr, CLI_T("Cannot open MIDI output %d\n", "MIDI 出力 %d を開けない\n"), port);
 		return 1;
 	}
 	MIDIOUTCAPSA caps{};
 	midiOutGetDevCapsA(UINT(port), &caps, sizeof(caps));
-	std::printf("送り先: %d: %s\n", port, caps.szPname);
+	std::printf(CLI_T("Sending to: %d: %s\n", "送り先: %d: %s\n"), port, caps.szPname);
 
 	timeBeginPeriod(1);
 	const DWORD start = timeGetTime();
@@ -112,6 +115,6 @@ int main(int argc, char **argv)
 	timeEndPeriod(1);
 	midiOutReset(out);
 	midiOutClose(out);
-	std::printf("送信終了\n");
+	std::printf(CLI_T("Finished sending\n", "送信終了\n"));
 	return 0;
 }

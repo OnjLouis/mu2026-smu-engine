@@ -1,10 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the AUv3 container app.
+
+  **No App Sandbox here, on purpose.** The app's one job beyond carrying the
+  .appex into registration is putting the user's ROM images where the
+  extension can read them: an extension's container
+  (~/Library/Containers/<appex id>/Data/Library/Application Support/S-MU2000),
+  which is the only place outside its own bundle a sandboxed extension reaches.
+  A sandboxed process cannot write into a container that is not its own, so
+  this app has to run outside one.
+
+  The .appex keeps its sandbox. That is not negotiable: a macOS app extension
+  outside the sandbox never registers, and LaunchServices/pluginkit will not
+  pick it up however correct the signature is (doc/auv3.md).
+
+  The JIT entitlement the extension needs (com.apple.security.cs.allow-jit)
+  belongs to the extension as well, and stays in packaging/auv3-appex.entitlements.
+-->
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
-	<key>com.apple.security.files.user-selected.read-only</key>
-	<true/>
 </dict>
 </plist>

@@ -6,6 +6,7 @@
 //
 // rom ディレクトリには MU2000 リポジトリの roms/ をそのまま渡せる。
 
+#include "compat/cli_text.h"
 #include "mu2000.h"
 
 #include <cstdio>
@@ -16,9 +17,10 @@
 
 int main(int argc, char **argv)
 {
+	smu2000::cli::init(argc, argv);       // -jp で日本語
 	if (argc < 2) {
 		std::fprintf(stderr,
-			"使い方: boot <rom ディレクトリ> [サイクル数] [--trace-swp <出力先>] [-v]\n");
+			CLI_T("Usage: boot <rom directory> [cycles] [--trace-swp <output file>] [-v]\n", "使い方: boot <rom ディレクトリ> [サイクル数] [--trace-swp <出力先>] [-v]\n"));
 		return 1;
 	}
 
@@ -66,13 +68,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	if (!mu.load_sintab(dir + "/standin/sin-table.bin"))
-		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+		std::fprintf(stderr, CLI_T("Warning: %s\n", "警告: %s\n"), mu.error().c_str());
 
 	std::FILE *tf = nullptr;
 	if (trace) {
 		tf = std::fopen(trace, "w");
 		if (!tf) {
-			std::fprintf(stderr, "書けない: %s\n", trace);
+			std::fprintf(stderr, CLI_T("Cannot write: %s\n", "書けない: %s\n"), trace);
 			return 1;
 		}
 		mu.set_swp_trace(tf, with_reads);
@@ -95,13 +97,13 @@ int main(int argc, char **argv)
 		hf = std::fopen(pchash, "w");
 		smu2000::g_pc_hash = hf;
 	}
-	std::printf("リセット後  PC=%08x\n", mu.cpu().pc());
+	std::printf(CLI_T("After reset  PC=%08x\n", "リセット後  PC=%08x\n"), mu.cpu().pc());
 
 	// 少しずつ走らせて、進んでいるか見る
 	const u64 step = cycles / 10 ? cycles / 10 : cycles;
 	for (u64 done = 0; done < cycles; done += step) {
 		mu.run_cycles(step);
-		std::printf("%10llu サイクル  PC=%08x\n",
+		std::printf(CLI_T("%10llu cycles  PC=%08x\n", "%10llu サイクル  PC=%08x\n"),
 		            (unsigned long long)mu.cpu().total_cycles(), mu.cpu().pc());
 	}
 

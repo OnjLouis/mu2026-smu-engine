@@ -1,0 +1,343 @@
+:root {
+    color-scheme: dark;
+}
+
+body {
+    font-family: system-ui, sans-serif;
+    max-width: 60rem;
+    margin: 2rem auto;
+    padding: 0 1rem;
+    background: #14161a;
+    color: #e8e8e8;
+}
+
+h1 {
+    font-size: 1.75rem;
+    margin: 0 0 0.5rem;
+}
+
+header {
+    margin: 2.5rem 0 0;
+}
+
+.eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 0.75rem;
+    color: #7fb3e8;
+    margin: 0 0 0.5rem;
+}
+
+.lede {
+    font-size: 1.05rem;
+    color: #c9c9c9;
+    margin: 0;
+}
+
+.card h2 {
+    font-size: 1.05rem;
+    margin: 0 0 0.5rem;
+}
+
+.badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #9fd6ff;
+    border: 1px solid #2f5b8a;
+    background: #1a2c44;
+    border-radius: 999px;
+    padding: 0.15rem 0.65rem;
+    margin: 0 0 0.6rem;
+}
+
+.meta {
+    font-size: 0.8rem;
+    color: #8a8a8a;
+    margin: 0.6rem 0 0;
+}
+
+.ticks {
+    margin: 0;
+    padding-left: 1.2rem;
+    color: #bdbdbd;
+    font-size: 0.9rem;
+}
+
+.ticks li {
+    margin: 0.35rem 0;
+}
+
+.ticks code {
+    font-size: 0.85em;
+    background: #14161a;
+    border: 1px solid #333;
+    border-radius: 0.3rem;
+    padding: 0.05rem 0.35rem;
+}
+
+footer {
+    margin: 2rem 0 1rem;
+    font-size: 0.85rem;
+    color: #8a8a8a;
+}
+
+a {
+    color: #8ab4f8;
+}
+
+.nav {
+    margin-bottom: 1rem;
+}
+
+.card {
+    background: #1d2026;
+    border: 1px solid #333;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin: 1rem 0;
+}
+
+.note {
+    color: #999;
+    font-size: 0.85rem;
+}
+
+/* Buttons and button-like labels (the file inputs hide inside these). */
+.btn {
+    display: inline-block;
+    font-size: 1rem;
+    padding: 0.5rem 1.5rem;
+    border: 1px solid #4a5568;
+    border-radius: 0.4rem;
+    background: #2d3748;
+    color: #fff;
+    cursor: pointer;
+    user-select: none;
+}
+
+.btn:hover:not(.disabled) {
+    background: #3a465c;
+}
+
+.btn.primary {
+    background: #2b6cb0;
+    border-color: #2b6cb0;
+}
+
+.btn.primary:hover:not(:disabled) {
+    background: #2c7fc4;
+}
+
+button.btn:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.btn input[type="file"] {
+    display: none;
+}
+
+/* Dropdowns (MIDI port assignment). */
+select {
+    font-size: 0.95rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #4a5568;
+    border-radius: 0.4rem;
+    background: #2d3748;
+    color: #fff;
+}
+
+/* Progress bars. */
+progress {
+    width: 100%;
+    height: 1.2rem;
+    margin-top: 0.75rem;
+    background: #2d3748;
+    border: 1px solid #333;
+    border-radius: 0.4rem;
+    overflow: hidden;
+}
+
+progress::-webkit-progress-bar {
+    background: #2d3748;
+}
+
+progress::-webkit-progress-value {
+    background: #2b6cb0;
+}
+
+progress::-moz-progress-bar {
+    background: #2b6cb0;
+}
+
+#status {
+    display: block;
+    margin-top: 0.5rem;
+    min-height: 1.5em;
+    color: #ccc;
+}
+
+#songStatus {
+    display: block;
+    margin-top: 0.5rem;
+    min-height: 1.5em;
+    color: #ccc;
+}
+
+/* ROM checklist. */
+#romList {
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0 0;
+}
+
+#romList li {
+    padding: 0.15rem 0;
+}
+
+#romList .found {
+    color: #7fd67f;
+}
+
+#romList .missing {
+    color: #e08080;
+}
+
+#romList .optional {
+    color: #999;
+}
+
+/* Result player. */
+#player {
+    width: 100%;
+    margin-top: 0.5rem;
+}
+
+#download {
+    display: inline-block;
+    margin-top: 0.5rem;
+}
+
+/* Project link with GitHub mark. */
+.project-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.project-link svg {
+    width: 1.1em;
+    height: 1.1em;
+    fill: currentcolor;
+}
+
+/* Landing page hero screenshot. */
+.hero {
+    margin: 1rem 0;
+}
+
+.hero img {
+    width: 100%;
+    height: auto;
+    border: 1px solid #333;
+    border-radius: 0.5rem;
+}
+
+.hero figcaption {
+    margin-top: 0.35rem;
+}
+
+/* Landing page cards. */
+.choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: 1rem;
+}
+
+.choices .card {
+    text-decoration: none;
+    color: inherit;
+}
+
+.choices .card:hover {
+    border-color: #2b6cb0;
+}
+
+.choices h2 {
+    font-size: 1.1rem;
+    margin: 0 0 0.5rem;
+}
+
+.choices p {
+    color: #999;
+    font-size: 0.9rem;
+    margin: 0;
+}
+
+/* Live page: MIDI device rows and activity dots. */
+.device {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0;
+    border-top: 1px solid #2a2e35;
+}
+
+.device:first-child {
+    border-top: none;
+}
+
+.device .name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ports {
+    display: flex;
+    gap: 1.25rem;
+    margin: 0.5rem 0;
+}
+
+.port {
+    text-align: center;
+}
+
+.dot {
+    width: 1.4rem;
+    height: 1.4rem;
+    border-radius: 50%;
+    background: #333;
+    border: 1px solid #555;
+    margin: 0 auto 0.25rem;
+    transition: background 0.05s;
+}
+
+.dot.lit {
+    background: #7fd67f;
+    border-color: #7fd67f;
+    box-shadow: 0 0 0.5rem #7fd67f;
+}
+
+.port .count {
+    font-size: 0.8rem;
+    color: #999;
+}
+
+#lastMessage {
+    font-family: monospace;
+    font-size: 0.85rem;
+    color: #999;
+    min-height: 1.5em;
+}
+
+.row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+}

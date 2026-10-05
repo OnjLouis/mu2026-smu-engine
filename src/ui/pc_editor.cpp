@@ -143,7 +143,7 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 
 	// 数を打つ
 	if (ImGui::BeginPopup("##type")) {
-		ImGui::TextDisabled("%s（%d-%d）", p.label, p.min, p.max);
+		ImGui::TextDisabled(UI_TEXT(cap_range1_fmt, "%s (%d-%d)"), p.label, p.min, p.max);
 		const ImGuiID typed_id = ImGui::GetID("typed");
 		ImGuiStorage *st = ImGui::GetStateStorage();
 		int typed = st->GetInt(typed_id, v);
@@ -490,13 +490,11 @@ void pc_editor::drum_page(xg::model &m, const xg_snapshot &ram, bridge &br)
 }
 
 
-void pc_editor::decode_page(xg::model &m)
+void pc_editor::decode_page(xg::model &m, bridge &br)
 {
 	const float fs = ImGui::GetFontSize();
 	const ImGuiStyle &st = ImGui::GetStyle();
-	ImGui::TextDisabled("%s", UI_TEXT(sxd_hint, "Paste MIDI one message per line (\"F0 43 10 4C ...\", \"f0h 43h ...\", Domino's Ex: lines). The meaning of each line shows on its right. Effect parameters are read with the effect types set now"));
-	if (ImGui::SmallButton(UI_TEXT(sxd_clear, "Clear")))
-		m_sx_text[0] = 0;
+	ImGui::TextDisabled("%s", UI_TEXT(sxd_hint, "Paste MIDI one message per line (\"F0 43 10 4C ...\", \"f0h 43h ...\", Domino's Ex: lines). The meaning of each line shows on its right; drag its values (part, value, channel...) to rewrite the line. Effect parameters are read with the effect types set now"));
 
 	// 行に分ける
 	std::vector<std::string> lines(1);
@@ -506,29 +504,173 @@ void pc_editor::decode_page(xg::model &m)
 		else if (*p != '\r')
 			lines.back() += *p;
 	}
+	auto store = [&]() {
+		std::string all;
+		for (size_t i = 0; i < lines.size(); i++)
+			all += (i ? "\n" : "") + lines[i];
+		const size_t n = std::min(all.size(), sizeof(m_sx_text) - 1);
+		std::memcpy(m_sx_text, all.data(), n);
+		m_sx_text[n] = 0;
+	};
+	// 送る。out が真なら送り先（Ctrl＋右クリックと同じ）、偽なら音源へ
+	auto send_line = [&](const std::string &line, bool out) {
+		int sent = 0;
+		for (std::vector<u8> &msg : sxd::split(sxd::bytes_of(line))) {
+			if (msg.empty() || (msg[0] < 0x80))
+				continue;
+			if (out ? out_send(br, msg, 0) : br.send(msg))
+				sent++;
+		}
+		return sent;
+	};
+
+	// 送るボタンは色で分ける。送り先（外）は橙、音源は緑
+	auto push_color = [](bool out) {
+		const ImVec4 base = out ? ImVec4(0.72f, 0.40f, 0.12f, 1.0f) : ImVec4(0.16f, 0.50f, 0.36f, 1.0f);
+		ImGui::PushStyleColor(ImGuiCol_Button, base);
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(base.x * 1.25f, base.y * 1.25f, base.z * 1.25f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(base.x * 1.45f, base.y * 1.45f, base.z * 1.45f, 1.0f));
+	};
+
+	if (ImGui::SmallButton(UI_TEXT(sxd_clear, "Clear")))
+		m_sx_text[0] = 0;
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!out_ready());
+	push_color(true);
+	const bool all_out = ImGui::SmallButton(UI_TEXT(sxd_send_all_out, "Send all to the port"));
+	ImGui::PopStyleColor(3);
+	if (all_out) {
+		int n = 0;
+		for (const std::string &l : lines)
+			n += send_line(l, true);
+		char note[64];
+		std::snprintf(note, sizeof(note), UI_TEXT(sxd_sent_fmt, "Sent %d"), n);
+		out_note(note);
+	}
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	push_color(false);
+	const bool all_in = ImGui::SmallButton(UI_TEXT(sxd_send_all_in, "Play all into the sound engine"));
+	ImGui::PopStyleColor(3);
+	if (all_in) {
+		int n = 0;
+		for (const std::string &l : lines)
+			n += send_line(l, false);
+		char note[64];
+		std::snprintf(note, sizeof(note), UI_TEXT(sxd_sent_fmt, "Sent %d"), n);
+		out_note(note);
+	}
+	if (out_ready()) {
+		ImGui::SameLine(0, fs * 1.5f);
+		out_port_combo();
+	}
+
 	const float line_h = ImGui::GetTextLineHeight();
 	// 欄は行の数ぶんの高さにして、中では送らない（右の意味と行をそろえるため）。送るのは外の枠
 	if (ImGui::BeginChild("sxd", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar)) {
 		const ImVec2 avail = ImGui::GetContentRegionAvail();
-		const float box_w = std::min(fs * 30.0f, avail.x * 0.45f);
+		const float box_w = std::min(fs * 30.0f, avail.x * 0.42f);
 		const float box_h = std::max(avail.y, float(lines.size() + 2) * line_h + st.FramePadding.y * 2.0f);
 		const ImVec2 top = ImGui::GetCursorScreenPos();
 		ImGui::InputTextMultiline("##sx", m_sx_text, sizeof(m_sx_text), ImVec2(box_w, box_h));
-		ImDrawList *dl = ImGui::GetWindowDrawList();
-		const float x = top.x + box_w + fs * 0.8f;
+		const bool typing = ImGui::IsItemActive();
+		const float x = top.x + box_w + fs * 0.6f;
 		const float y0 = top.y + st.FramePadding.y;
-		const ImVec2 mouse = ImGui::GetIO().MousePos;
+		// 右の部品は字の行と同じ高さに（上下の余白を無くす）
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(fs * 0.25f, 0.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(fs * 0.35f, 0.0f));
+		bool dirty = false;
 		for (size_t i = 0; i < lines.size(); i++) {
-			bool bad = false;
-			const std::string s = sxd::line(lines[i], m, bad);
-			if (s.empty())
+			std::vector<std::vector<u8>> msgs = sxd::split(sxd::bytes_of(lines[i]));
+			if (msgs.empty())
 				continue;
-			const float y = y0 + float(i) * line_h;
-			dl->AddText(ImVec2(x, y), bad ? IM_COL32(255, 170, 90, 255) : ImGui::GetColorU32(ImGuiCol_Text), s.c_str());
-			// 長くて見切れる行は、カーソルを載せると全部出す
-			if (mouse.x >= x && mouse.y >= y && mouse.y < y + line_h && ImGui::IsWindowHovered())
-				ImGui::SetTooltip("%s", s.c_str());
+			ImGui::PushID(int(i));
+			ImGui::SetCursorScreenPos(ImVec2(x, y0 + float(i) * line_h));
+			// この行を送る（送り先へ）・音源へ入れる
+			ImGui::BeginDisabled(!out_ready());
+			push_color(true);
+			const bool line_out = ImGui::SmallButton(UI_TEXT(sxd_send_out, "Out"));
+			ImGui::PopStyleColor(3);
+			if (line_out)
+				out_note(std::string(UI_TEXT(sxd_sent_line, "Sent line ")) + std::to_string(i + 1) + " (" + std::to_string(send_line(lines[i], true)) + ")");
+			ImGui::EndDisabled();
+			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("%s", UI_TEXT(sxd_send_out_tip, "Send this line to the send-to port"));
+			ImGui::SameLine();
+			push_color(false);
+			const bool line_in = ImGui::SmallButton(UI_TEXT(sxd_send_in, "In"));
+			ImGui::PopStyleColor(3);
+			if (line_in)
+				out_note(std::string(UI_TEXT(sxd_played_line, "Played line ")) + std::to_string(i + 1) + " (" + std::to_string(send_line(lines[i], false)) + ")");
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", UI_TEXT(sxd_send_in_tip, "Play this line into the sound engine"));
+			bool changed = false;
+			for (size_t k = 0; k < msgs.size(); k++) {
+				ImGui::PushID(int(k));
+				if (k) {
+					ImGui::SameLine();
+					ImGui::TextDisabled("|");
+				}
+				const std::vector<sxd::field> fields = sxd::fields_of(msgs[k], m);
+				for (size_t j = 0; j < fields.size(); j++) {
+					const sxd::field &f = fields[j];
+					ImGui::PushID(int(j));
+					ImGui::SameLine();
+					if (f.kind == sxd::fk::text) {
+						if (f.bad)
+							ImGui::TextColored(ImVec4(1.0f, 0.67f, 0.35f, 1.0f), "%s", f.text.c_str());
+						else
+							ImGui::TextUnformatted(f.text.c_str());
+						ImGui::PopID();
+						continue;
+					}
+					if (!f.text.empty()) {
+						ImGui::TextDisabled("%s", f.text.c_str());
+						ImGui::SameLine(0, fs * 0.2f);
+					}
+					std::string shown;
+					float w = fs * 3.0f;
+					switch (f.kind) {
+					case sxd::fk::part: shown = part_name(f.value); w = fs * 2.6f; break;
+					case sxd::fk::dkey: shown = drum_key_text(f.value); w = fs * 4.0f; break;
+					case sxd::fk::dset:
+					case sxd::fk::ch:   shown = std::to_string(f.value + 1); w = fs * 1.8f; break;
+					case sxd::fk::bend: shown = (f.value >= 0 ? "+" : "") + std::to_string(f.value); w = fs * 3.5f; break;
+					default:
+						shown = sxd::value_text(f);
+						w = std::max(fs * 3.0f, std::min(fs * 9.0f, ImGui::CalcTextSize(shown.c_str()).x + fs * 0.8f));
+						break;
+					}
+					// 書式の % は DragInt の書式として読まれないよう重ねる
+					std::string fmt;
+					for (char c : shown) {
+						if (c == '%')
+							fmt += '%';
+						fmt += c;
+					}
+					int v = f.value;
+					ImGui::SetNextItemWidth(w);
+					const float speed = f.hi - f.lo > 1000 ? 16.0f : 0.25f;
+					ImGui::DragInt("##f", &v, speed, f.lo, f.hi, fmt.c_str(), ImGuiSliderFlags_AlwaysClamp);
+					if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0.0f)
+						v = std::clamp(v + (ImGui::GetIO().MouseWheel > 0 ? 1 : -1), f.lo, f.hi);
+					if (v != f.value && !typing) {
+						sxd::apply(msgs[k], f, v);
+						changed = true;
+					}
+					ImGui::PopID();
+				}
+				ImGui::PopID();
+			}
+			if (changed) {
+				lines[i] = sxd::write_line(msgs, sxd::style_of(lines[i]));
+				dirty = true;
+			}
+			ImGui::PopID();
 		}
+		ImGui::PopStyleVar(2);
+		if (dirty)
+			store();
 	}
 	ImGui::EndChild();
 }
@@ -614,7 +756,7 @@ void pc_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		const ImGuiTabItemFlags sx_flags = open_sx ? ImGuiTabItemFlags_SetSelected : 0;
 		open_sx = false;
 		if (ImGui::BeginTabItem(UI_TEXT(ed_tab_sysex, "SysEx"), nullptr, sx_flags)) {
-			decode_page(m);
+			decode_page(m, br);
 			ImGui::EndTabItem();
 		}
 		if (open_drum > 0) {

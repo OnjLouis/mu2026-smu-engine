@@ -6,6 +6,14 @@ build-*/
 *.wav
 roms/
 
+# web/ build outputs and deps (rebuild with npm run build in web/)
+web/out/
+web/node_modules/
+web/dist/
+
+# JetBrains configuration files
+.idea/
+
 # 同じところで MAME を走らせたときに出るもの
 cfg/
 nvram/
@@ -13,3 +21,5 @@ snap/
 __pycache__/
 # MIDI files may come with incompatible licenses; keep them local
 *.mid
+# フォントの実体。fc_match_probe.sh の検証用なので追跡しない
+fonts/

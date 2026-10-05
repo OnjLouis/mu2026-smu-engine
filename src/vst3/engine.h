@@ -14,6 +14,7 @@
 #pragma once
 
 #include "ui/bridge.h"
+#include "ui/cpu_meter.h"
 #include "ui/driver.h"
 #include "ui/resampler.h"
 
@@ -108,6 +109,14 @@ public:
 	// 起動が終わるまで待つ。**DAW の本スレッドからだけ**呼ぶこと。
 	// 待ちきれずに時間切れなら false。始まっていなければ始めてから待つ
 	bool wait_ready(int ms);
+	// 止めておく・戻す。IPluginBase::terminate / initialize から（**音声スレッドが回っていないとき**）。
+	// park は起動を待ちきってから、スレーブの別スレッドを止める。この DLL のコードを走るスレッドを
+	// 残さないため（ホストが本体を手放さないまま DLL を外すと、残ったスレッドが消えたコードを走って落ちる）。
+	// unpark は止めたものを戻す
+	void park();
+	void unpark();
+	// まだ生きている engine を全部 park する。ExitDll（DLL を外す直前）から
+	static void park_all();
 
 	status state() const { return m_state.load(std::memory_order_acquire); }
 	// state() が failed のときの理由。ready でも「代用品を使った」等が入る
@@ -180,6 +189,9 @@ public:
 
 	// 記録（%LOCALAPPDATA%\S-MU2000\log.txt）へ 1 行書く
 	void log_line(const char *text);
+	// ホストからの呼び出しを記録に残す（どのスレッドが、何を、どこまで）。固まる・落ちるの報告で、最後にどこまで
+	// 進んだかを見るため。呼ばれるのは起動・終了・画面の開閉などまれなものだけ（音声の処理では呼ばない）
+	static void trace(const char *what, const void *self = nullptr, long long a = 0, long long b = 0);
 
 	// 再生位置が飛んだ、止まった等。変換器の中身だけ捨てる
 	void flush_resampler();
@@ -266,6 +278,9 @@ private:
 	// 起動は 1 度だけ。start() が exchange で守る（2 度やると
 	// 動き中の機械 m_mu を丸ごと差し替えてしまう）
 	std::atomic<bool>   m_boot_once{false};
+	bool                m_threaded = true;   // plugin.ini の threaded（unpark で戻す）
+	bool                m_parked = false;
+	std::mutex          m_park_mutex;
 
 	std::unique_ptr<mu2000> m_mu = nullptr;
 	// 読み込んだ ROM を掴んでおく。他の枚数ぶんと分け合っている
@@ -315,7 +330,7 @@ private:
 	std::atomic<void *> m_wg_want{nullptr};
 	void *m_wg_sent = nullptr;
 	std::atomic<int> m_native_engine{0};
-	double m_load = 0.0;           // 一覧に出す重さ（%）
+	ui::cpu_meter m_cpu_meter;     // recent CPU load, measured in audio time
 	ui::driver m_drv;
 
 	// MIDI OUT mirror. pump_out() inside fill() drains the machine queue

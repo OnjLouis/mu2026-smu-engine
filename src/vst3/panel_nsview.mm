@@ -4,7 +4,7 @@
 //
 // There is no second copy of the panel in here: what is built is the *same*
 // view the VST3 build shows -- smu2000::vst3::plug_view, which is
-// src/vst3/view.cpp drawing through compat/gdi_mac.cpp, inside the NSView from
+// src/vst3/view.cpp drawing through Dear ImGui + Metal, inside the NSView from
 // src/vst3/view_mac.mm. Only the way a host asks for it differs, which is the
 // whole reason the three formats can share one engine and one editor.
 

@@ -20,12 +20,15 @@
 // マウスホイールはダイヤルに割り当ててある。実機にもロータリー
 // エンコーダがあり、VALUE -/+ のボタンと同じ働きをする。
 
+#include "compat/cli_text.h"
 #include "compat/console.h"
+#include "compat/crash_log.h"
 
 #include "mu2000.h"
 #include "ui/app_win.h"
 #include "ui/lang.h"
 #include "ui/options.h"
+#include "ui/rom_locate.h"
 #include "ui/tool_args.h"
 #include "ui/window_win.h"
 
@@ -50,6 +53,9 @@ using namespace ui;
 int main(int argc, char **argv)
 {
 	smu2000::init_console_utf8();
+	smu2000::cli::init(argc, argv);       // -jp で、コンソールの言葉を日本語に
+	// abort() や std::terminate で止まったら、呼び出し元を <設定>/S-MU2000/crash.txt に残す
+	smu2000::crash_log::install();
 
 	ui::tool_args a;
 	a.latency = 20;        // 溜める目標 (per-backend default; the shared parser keeps it)
@@ -59,6 +65,9 @@ int main(int argc, char **argv)
 
 	// The flags are shared (ui/tool_args.h); only latency above stays per side
 	const int parsed = ui::parse_tool_args(argc, argv, a, eng_opts, out_opts, win_opts);
+	// コンソールの言葉は、画面の言葉が日本語なら日本語（-jp や SMU2000_LANG でも）
+	if (ui::get_lang() == ui::lang::ja)
+		smu2000::cli::set_japanese(true);
 	// The language resolves here, from the parsed --lang (then editor.ini,
 	// then the locale), before any texts() use below
 	ui::init_lang(a.lang.c_str());
@@ -75,6 +84,10 @@ int main(int argc, char **argv)
 	if (!a.shot_path.empty() && (a.dir.empty() || !a.boot_for_shot))
 		return ui::empty_shot(br, a, win_opts);
 
+	// ROM の場所を渡されなければ（ダブルクリックなど）、プラグインと同じ順番で探し、無ければ選んでもらう
+	// （ui/rom_locate.h、issue #89）
+	if (a.dir.empty())
+		a.dir = ui::locate_roms_for_gui(smu2000::exe_dir());
 	if (a.dir.empty()) {
 		ui::print_usage();
 		return 1;

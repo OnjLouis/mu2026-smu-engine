@@ -13,6 +13,8 @@
 
 #include "compat/paths.h"
 #include "compat/platform.h"
+#include "rom_search.h"
+#include "roms_dir.h"
 
 #include <algorithm>
 #include <chrono>
@@ -41,35 +43,12 @@ namespace {
 // The OS answers now come from compat/paths.h: where this image lives, what
 // the environment says, and where the per-user settings directory is. Only the
 // search order below is this file's business.
-
-// そのディレクトリが ROM 置き場かどうか
-bool has_roms(const std::string &dir)
-{
-	return !dir.empty() && smu2000::is_file(smu2000::join(dir, "mu2000_flash.bin"));
-}
-
-// roms.txt に書かれた場所を読む（1 行目だけ）
-std::string read_pointer_file(const std::string &path)
-{
-	std::FILE *f = std::fopen(path.c_str(), "rb");
-	if (!f)
-		return {};
-	char line[1024] = {};
-	if (!std::fgets(line, sizeof(line), f)) { std::fclose(f); return {}; }
-	std::fclose(f);
-	std::string s(line);
-	// メモ帳などが付ける BOM を落とす。これがあると場所を見失う
-	if (s.size() >= 3 && (unsigned char)s[0] == 0xef && (unsigned char)s[1] == 0xbb &&
-	    (unsigned char)s[2] == 0xbf)
-		s.erase(0, 3);
-	while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
-	                      s.back() == ' '  || s.back() == '\t'))
-		s.pop_back();
-	const std::filesystem::path specified(std::u8string(s.begin(), s.end()));
-	const std::filesystem::path resolved = specified.is_relative()
-		? std::filesystem::path(path).parent_path() / specified : specified;
-	return resolved.lexically_normal().string();
-}
+//
+// What counts as a ROM directory comes from roms_dir.h, which the AUv3's
+// container app also uses to put a set in place. It asks for the whole set
+// (the program ROM and the four wave ROMs), not just a program ROM: a
+// half-copied directory must not shadow a complete one, since the search stops
+// at the first hit and a partial one cannot play anything.
 
 // ---- 記録。画面が無いので、うまくいかなかったときはここを見てもらう
 
@@ -100,77 +79,13 @@ void logf(const char *fmt, ...)
 	std::fclose(f);
 }
 
-// ROM 置き場を探す。見つかった場所を返す。無ければ空で、探した場所が tried に入る
+// ROM 置き場を探す（順番は src/rom_search.h。gui と同じ）。見つかった場所を返す。無ければ空で、
+// 探した場所が tried に入る。The address of a function in this image is what locates the image:
+// a module handle on Windows, the Mach-O header on macOS
 std::string find_roms(std::string &tried)
 {
-	std::vector<std::string> cand;
-
-	// 1. 環境変数。一番強い
-	const std::string ev = smu2000::env("S_MU2000_ROMS");
-	if (!ev.empty())
-		cand.push_back(ev);
-
-	// The address of a function in this image is what locates the image:
-	// a module handle on Windows, the Mach-O header on macOS
 	const std::string dir = smu2000::module_dir(reinterpret_cast<const void *>(&logf));
-	if (!dir.empty()) {
-		// 2. バンドルの Resources。
-		//    <名前>.vst3/Contents/x86_64-win/ に DLL がいるので 1 つ上
-		//    (macOS puts the binary in Contents/MacOS, also one level up)
-		cand.push_back(smu2000::join(dir, "../Resources"));
-		cand.push_back(smu2000::join(dir, "../Resources/roms"));
-		// 3. DLL のすぐ横
-		cand.push_back(smu2000::join(dir, "roms"));
-		cand.push_back(dir);
-		// 4. 場所を書いた紙
-		const std::string notes[2] = { smu2000::join(dir, "../Resources/roms.txt"),
-		                               smu2000::join(dir, "roms.txt") };
-		for (const std::string &p : notes) {
-			const std::string s = read_pointer_file(p);
-			if (!s.empty())
-				cand.push_back(s);
-		}
-	}
-
-	// 5. The fixed places, following where macOS puts an application's own data
-	//    (Application Support, Documents). Per-user comes first and machine-wide
-	//    last, so a user's own copy wins
-	const std::string local = smu2000::config_dir();
-	if (!local.empty()) {
-		// A note naming the directory. Someone using this from a DAW has nowhere
-		// to set an environment variable, so one line here (roms.txt) does it
-		const std::string note = read_pointer_file(smu2000::join(local, "roms.txt"));
-		if (!note.empty())
-			cand.push_back(note);
-		cand.push_back(smu2000::join(local, "roms"));
-		cand.push_back(local);
-	}
-	const std::string home = smu2000::home_dir();
-	if (!home.empty())
-		cand.push_back(smu2000::join(home, "Documents/S-MU2000/roms"));
-
-	// 6. The machine-wide places. **Put the ROMs here once and every user of the
-	//    machine, and every instance of either plug-in, finds them.** The AU is
-	//    one bundle in Components, shared by all accounts, so this is its
-	//    intended home (/Library/Application Support, %ProgramData% on Windows)
-	//
-	//    This program never writes here: creating it takes the rights to
-	const std::string shared = smu2000::shared_config_dir();
-	if (!shared.empty()) {
-		const std::string note = read_pointer_file(smu2000::join(shared, "roms.txt"));
-		if (!note.empty())
-			cand.push_back(note);
-		cand.push_back(smu2000::join(shared, "roms"));
-		cand.push_back(shared);
-	}
-
-	for (const std::string &c : cand) {
-		const std::string p = smu2000::full_path(c);
-		if (has_roms(p))
-			return p;
-		tried += "  " + p + "\n";
-	}
-	return {};
+	return smu2000::find_roms(dir, false, tried);
 }
 
 } // namespace
@@ -192,6 +107,10 @@ std::mutex             g_rom_mutex;
 std::string            g_rom_dir;
 std::weak_ptr<rom_set> g_roms;
 
+// 生きている engine（park_all が止める）
+std::mutex           g_live_mutex;
+std::vector<engine *> g_live;
+
 } // namespace
 
 
@@ -200,10 +119,48 @@ engine::engine()
 	build_table();
 	for (std::vector<uint8_t> &p : m_pending)
 		p.reserve(4096);
+	std::lock_guard<std::mutex> lock(g_live_mutex);
+	g_live.push_back(this);
+}
+
+void engine::park()
+{
+	std::lock_guard<std::mutex> lock(m_park_mutex);
+	// 起動の途中なら打ち切る。打ち切ったら、次の start でやり直せるようにしておく
+	if (m_thread.joinable()) {
+		m_abort.store(true, std::memory_order_relaxed);
+		m_thread.join();
+		m_abort.store(false, std::memory_order_relaxed);
+		if (state() == status::loading)
+			m_boot_once.store(false, std::memory_order_release);
+	}
+	if (m_mu && m_mu->threaded()) {
+		m_mu->set_threaded(false);
+		m_parked = true;
+	}
+}
+
+void engine::unpark()
+{
+	std::lock_guard<std::mutex> lock(m_park_mutex);
+	if (m_parked && m_mu)
+		m_mu->set_threaded(m_threaded);
+	m_parked = false;
+}
+
+void engine::park_all()
+{
+	std::lock_guard<std::mutex> lock(g_live_mutex);
+	for (engine *e : g_live)
+		e->park();
 }
 
 engine::~engine()
 {
+	{
+		std::lock_guard<std::mutex> lock(g_live_mutex);
+		g_live.erase(std::remove(g_live.begin(), g_live.end(), this), g_live.end());
+	}
 	m_abort.store(true, std::memory_order_relaxed);
 	if (m_thread.joinable())
 		m_thread.join();
@@ -224,6 +181,16 @@ engine::~engine()
 std::string engine::message() const
 {
 	return state() == status::loading ? std::string("起動中") : m_message;
+}
+
+void engine::trace(const char *what, const void *self, long long a, long long b)
+{
+#if defined(_WIN32)
+	const unsigned long tid = GetCurrentThreadId();
+#else
+	const unsigned long tid = 0;
+#endif
+	logf("host: %s [%p] %lld %lld (thread %lu)", what, self, a, b, tid);
 }
 
 void engine::log_line(const char *text)
@@ -378,6 +345,7 @@ void engine::boot()
 	if (fast_midi)
 		logf("plugin.ini: fast_midi=1（実物より速く直列に流す。実機と同じ間隔ではなくなる）");
 	mu->set_threaded(threaded);
+	m_threaded = threaded;
 	if (!threaded)
 		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
 	if (native_fx) {
@@ -525,6 +493,7 @@ void engine::set_output_rate(double rate)
 		for (int i = 0; i != HALF; i++)
 			m_fx_w = (m_fx_w + 1) & IN_MASK;
 	flush_resampler();
+	m_cpu_meter.reset();
 }
 
 void engine::flush_resampler()
@@ -813,10 +782,11 @@ void engine::publish_load(std::chrono::steady_clock::time_point t0, int n, doubl
 	if (n <= 0 || rate <= 0.0)
 		return;
 	const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-	const double pct = spent * rate / double(n) * 100.0;
-	// 大きい側はそのまま、小さい側はゆっくり（読める動きにする）
-	m_load = pct > m_load ? pct : m_load * 0.9 + pct * 0.1;
-	m_bridge.set_cpu(float(m_load));
+	// MIDI event splitting can make fill() as short as one sample. Accumulate
+	// all such pieces by audio time so a small piece cannot become a fake
+	// 100%+ CPU spike.
+	if (m_cpu_meter.add(spent, double(n) / rate))
+		m_bridge.set_cpu(float(m_cpu_meter.value()));
 	m_bridge.set_engine(m_native_engine.load(std::memory_order_relaxed) ? 1 : 0);
 }
 
@@ -1037,7 +1007,7 @@ bool engine::card_insert(const std::string &path, std::string &err)
 		return false;
 	}
 	card_flush();
-	if (!on_machine([card](mu2000 &m) { m.card() = std::move(*card); })) {
+	if (!on_machine([card](mu2000 &m) { m.card() = std::move(*card); m.card_swapped(); })) {
 		err = "カードを差せなかった（音声スレッドが応じない）";
 		return false;
 	}

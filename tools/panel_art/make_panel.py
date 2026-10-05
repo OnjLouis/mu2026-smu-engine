@@ -71,6 +71,12 @@ MODES = (("play", 1277, 175, "PLAY"), ("edit", 1348, 175, "EDIT"),
          ("util", 1277, 248, "UTIL"), ("effect", 1348, 248, "EFFECT"),
          ("sampling", 1277, 322, "SAMPLING"), ("seq", 1348, 322, "SEQ"))
 MODE_R = 15
+# the dark rim round each mode button: drawn in the button's own picture (not
+# the panel), so it stays concentric whatever whole pixel the program puts the
+# picture on. Half the old recess (19 - 14 = 5 units).
+MODE_RIM = 2.5
+MODE_OUT = MODE_R - 1 + MODE_RIM
+MODE_BOX = MODE_OUT + 1.5          # the picture's half size: room for the rim's soft edge
 NAV = (("mute_solo", 1450, 176), ("part-", 1550, 176), ("part+", 1628, 176),
        ("enter", 1450, 250), ("select-", 1550, 250), ("select+", 1628, 250),
        ("exit", 1450, 324), ("value-", 1550, 324), ("value+", 1628, 324))
@@ -681,7 +687,6 @@ def background():
             d.text(cx - 2, cy - 27, lab, 19, extra='textLength="66" lengthAdjust="spacingAndGlyphs"')
         else:
             d.text(cx + (3 if lab == "PLAY" else 0), cy - 27, lab, 19)
-        d.add(f'<circle cx="{cx}" cy="{cy}" r="{MODE_R + 4}" fill="#26241f" filter="url(#inset)"/>')
 
     # ---- nav keys: the dark wells around them
     # ":··· ALL ···:" over the PART pair (measured off a close-up): three dots
@@ -870,6 +875,9 @@ LAMP = {"green": ("#7bdc4a", "#6fce43", "#c8ff9a", "#2f6e22", "#c9ff9d"),
 def part_mode(state, lamp="green"):
     d = Doc()
     r = MODE_R - 1
+    # a plain disc: the inset filter made its thin edge lumpy once it sat in a
+    # picture this small
+    d.add(f'<circle r="{MODE_OUT}" fill="#1f1d19"/>')
     if state == "on":
         glow, face, light, dark, core = LAMP[lamp]
         d.add(f'<circle r="{r + 0.5}" fill="{glow}" opacity="0.6" filter="url(#blur4)"/>')
@@ -879,7 +887,7 @@ def part_mode(state, lamp="green"):
         hard_disc(d, r, "#4c514d", "#6d726e", "#232624", cy=0.6, glint=False)
     else:
         hard_disc(d, r, "#5a5f5b", "#8a8f8b", "#2a2d2b")
-    return d, (-MODE_R, -MODE_R, 2 * MODE_R, 2 * MODE_R)
+    return d, (-MODE_BOX, -MODE_BOX, 2 * MODE_BOX, 2 * MODE_BOX)
 
 
 def part_round(down):
@@ -960,7 +968,7 @@ def panel_txt():
     L.append("")
     for name, x, y, _ in MODES:
         L.append(f"mode.{name:<9} {LX(x)} {LY(y)}")
-    L.append(f"mode.r {LS(MODE_R)} {LS(MODE_R * 0.6)}")
+    L.append(f"mode.r {LS(MODE_BOX)} {LS(MODE_R * 0.6)}")
     L.append("")
     for name, x, y in NAV:
         L.append(f"nav.{name:<10} {LX(x - NAV_W / 2)} {LY(y - NAV_H / 2)} {LS(NAV_W)} {LS(NAV_H)}")
@@ -976,6 +984,9 @@ def panel_txt():
     L.append(f'dial   {LX(DIAL[0])} {LY(DIAL[1])} {LS(DIAL[2])} "dial.png"')
     L.append("")
     L.append(f"card   {LX(160)} {LY(598)} {LS(305)} {LS(72)}")
+    # the slot opening drawn in the channel above (rect 169, 642, 288 x 21);
+    # the panel draws the edge of an inserted card there
+    L.append(f"card.slot {LX(169)} {LY(642)} {LS(288)} {LS(21)}")
     L.append(f"adin   {LX(135)} {LY(150)} {LS(95)} {LS(230)}")
     L.append(f"phones {LX(400)} {LY(470)} {LS(70)} {LS(70)}")
     L.append("")

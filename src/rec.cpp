@@ -11,6 +11,7 @@
 // 受け取り、先頭 2ch だけを 16bit の WAV に落とす。
 // 実機（MU2000）を S/PDIF で受けている口を選べば、実機の音がそのまま録れる。
 
+#include "compat/cli_text.h"
 #include "smf.h"
 
 #include <algorithm>
@@ -61,7 +62,7 @@ bool collect(std::vector<IMMDevice *> &devs, std::vector<std::string> &names)
 		IMMDevice *d = nullptr;
 		if (FAILED(col->Item(i, &d))) continue;
 		IPropertyStore *props = nullptr;
-		std::string name = "(名前なし)";
+		std::string name = CLI_T("(no name)", "(名前なし)");
 		if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &props))) {
 			PROPVARIANT v;
 			PropVariantInit(&v);
@@ -96,6 +97,25 @@ void write_wav(const std::string &path, const std::vector<short> &pcm, unsigned 
 	std::fclose(f);
 }
 
+// 32bit 浮動小数の WAV（--float）。全振幅を 1.0 とする
+void write_wav_float(const std::string &path, const std::vector<float> &pcm, unsigned rate)
+{
+	std::FILE *f = std::fopen(path.c_str(), "wb");
+	if (!f) return;
+	const unsigned bytes = unsigned(pcm.size() * 4);
+	auto u32w = [&](unsigned v) { unsigned char b[4] = { (unsigned char)v, (unsigned char)(v >> 8),
+	                                                     (unsigned char)(v >> 16), (unsigned char)(v >> 24) };
+	                              std::fwrite(b, 1, 4, f); };
+	auto u16w = [&](unsigned v) { unsigned char b[2] = { (unsigned char)v, (unsigned char)(v >> 8) };
+	                              std::fwrite(b, 1, 2, f); };
+	std::fwrite("RIFF", 1, 4, f); u32w(36 + bytes); std::fwrite("WAVE", 1, 4, f);
+	std::fwrite("fmt ", 1, 4, f); u32w(16); u16w(3); u16w(2);
+	u32w(rate); u32w(rate * 8); u16w(8); u16w(32);
+	std::fwrite("data", 1, 4, f); u32w(bytes);
+	std::fwrite(pcm.data(), 1, bytes, f);
+	std::fclose(f);
+}
+
 // MIDI ファイルを実時間で流す。midisend.exe と同じことを別スレッドで。
 // SMF のポート指定（`FF 21`）で口 A〜D へ振り分ける。実機の MU2000 は
 // USB で `Yamaha MU2000-1` `-2` … と口が並ぶので、A〜D をそこへ渡す
@@ -114,7 +134,7 @@ void send_midi(const int want[4], const std::string &path, double delay)
 		if (want[i] < 0)
 			continue;
 		if (midiOutOpen(&outs[i], UINT(want[i]), 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
-			std::fprintf(stderr, "MIDI 出力 %d を開けない\n", want[i]);
+			std::fprintf(stderr, CLI_T("Cannot open MIDI output %d\n", "MIDI 出力 %d を開けない\n"), want[i]);
 	}
 	HMIDIOUT out = outs[0];
 	if (!out) {
@@ -201,13 +221,13 @@ int inquiry(int out_port, int in_port)
 
 	HMIDIOUT out = nullptr;
 	if (midiOutOpen(&out, UINT(out_port), 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-		std::fprintf(stderr, "MIDI 出力 %d を開けない\n", out_port);
+		std::fprintf(stderr, CLI_T("Cannot open MIDI output %d\n", "MIDI 出力 %d を開けない\n"), out_port);
 		return 1;
 	}
 	HMIDIIN in = nullptr;
 	if (midiInOpen(&in, UINT(in_port), (DWORD_PTR)inquiry_cb, (DWORD_PTR)&got,
 	               CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
-		std::fprintf(stderr, "MIDI 入力 %d を開けない\n", in_port);
+		std::fprintf(stderr, CLI_T("Cannot open MIDI input %d\n", "MIDI 入力 %d を開けない\n"), in_port);
 		midiOutClose(out);
 		return 1;
 	}
@@ -224,7 +244,7 @@ int inquiry(int out_port, int in_port)
 	h.dwBufferLength = sizeof(req);
 	midiOutPrepareHeader(out, &h, sizeof(h));
 	midiOutLongMsg(out, &h, sizeof(h));
-	std::printf("機器照会を送った（出力 %d）。返事を 2 秒待つ\n", out_port);
+	std::printf(CLI_T("Sent an identity request (output %d). Waiting 2 s for the reply\n", "機器照会を送った（出力 %d）。返事を 2 秒待つ\n"), out_port);
 	Sleep(2000);
 
 	midiInStop(in);
@@ -235,10 +255,10 @@ int inquiry(int out_port, int in_port)
 	midiOutClose(out);
 
 	if (got.empty()) {
-		std::printf("返事なし。機械が居ないか、MIDI が届いていない\n");
+		std::printf(CLI_T("No reply. The unit is not there, or MIDI is not reaching it\n", "返事なし。機械が居ないか、MIDI が届いていない\n"));
 		return 1;
 	}
-	std::printf("返事 %zu バイト:", got.size());
+	std::printf(CLI_T("Reply, %zu bytes:", "返事 %zu バイト:"), got.size());
 	for (unsigned char b : got)
 		std::printf(" %02X", b);
 	std::printf("\n");
@@ -250,15 +270,16 @@ int inquiry(int out_port, int in_port)
 
 int main(int argc, char **argv)
 {
+	smu2000::cli::init(argc, argv);       // -jp で日本語
 	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-		std::fprintf(stderr, "COM を初期化できない\n");
+		std::fprintf(stderr, CLI_T("Cannot initialize COM\n", "COM を初期化できない\n"));
 		return 1;
 	}
 
 	std::vector<IMMDevice *> devs;
 	std::vector<std::string> names;
 	if (!collect(devs, names)) {
-		std::fprintf(stderr, "入力デバイスを数えられない\n");
+		std::fprintf(stderr, CLI_T("Cannot enumerate the input devices\n", "入力デバイスを数えられない\n"));
 		return 1;
 	}
 
@@ -266,18 +287,21 @@ int main(int argc, char **argv)
 		return inquiry(std::atoi(argv[2]), std::atoi(argv[3]));
 
 	if (argc < 2 || !std::strcmp(argv[1], "--list")) {
-		std::printf("音声入力:\n");
+		std::printf(CLI_T("Audio inputs:\n", "音声入力:\n"));
 		for (size_t i = 0; i < names.size(); i++)
 			std::printf("  %zu: %s\n", i, names[i].c_str());
-		if (names.empty()) std::printf("  （なし）\n");
-		std::printf("\n使い方: rec <番号> <出力 wav> <秒数>\n"
+		if (names.empty()) std::printf(CLI_T("  (none)\n", "  （なし）\n"));
+		std::printf(CLI_T("\nUsage: rec <number> <output wav> <seconds>\n"
+"        [--send <MIDI output number> <MIDI file>] [--send-b <number>]\n"
+"        [--send-c <number>] [--send-d <number>]\n", "\n使い方: rec <番号> <出力 wav> <秒数>\n"
 		            "        [--send <MIDI 出力番号> <MIDI ファイル>] [--send-b <番号>]\n"
-		            "        [--send-c <番号>] [--send-d <番号>]\n");
+		            "        [--send-c <番号>] [--send-d <番号>]\n"));
 		return 0;
 	}
 	if (argc < 4) {
-		std::fprintf(stderr, "使い方: rec <番号> <出力 wav> <秒数> "
-		                     "[--send <MIDI 出力番号> <MIDI ファイル>]\n");
+		std::fprintf(stderr, CLI_T("Usage: rec <number> <output wav> <seconds> "
+"[--send <MIDI output number> <MIDI file>]\n", "使い方: rec <番号> <出力 wav> <秒数> "
+		                     "[--send <MIDI 出力番号> <MIDI ファイル>]\n"));
 		return 1;
 	}
 
@@ -287,8 +311,11 @@ int main(int argc, char **argv)
 	int midi_ports[4] = { -1, -1, -1, -1 };
 	std::string midi_file;
 	double midi_delay = 0.5;   // 録り始めてから流すまで
+	bool want_float = false;   // --float: 32bit 浮動小数の WAV で書く（16bit に落とさない）
 	for (int i = 4; i < argc; i++) {
-		if (!std::strcmp(argv[i], "--send") && i + 2 < argc) {
+		if (!std::strcmp(argv[i], "--float"))
+			want_float = true;
+		else if (!std::strcmp(argv[i], "--send") && i + 2 < argc) {
 			midi_ports[0] = std::atoi(argv[++i]);
 			midi_file = argv[++i];
 		} else if (!std::strcmp(argv[i], "--send-b") && i + 1 < argc)
@@ -301,14 +328,14 @@ int main(int argc, char **argv)
 			midi_delay = std::atof(argv[++i]);
 	}
 	if (index < 0 || size_t(index) >= devs.size()) {
-		std::fprintf(stderr, "そんな番号の入力は無い\n");
+		std::fprintf(stderr, CLI_T("There is no input with that number\n", "そんな番号の入力は無い\n"));
 		return 1;
 	}
 
 	IAudioClient *client = nullptr;
 	if (FAILED(devs[index]->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
 	                                 (void **)&client))) {
-		std::fprintf(stderr, "デバイスを開けない\n");
+		std::fprintf(stderr, CLI_T("Cannot open the device\n", "デバイスを開けない\n"));
 		return 1;
 	}
 	WAVEFORMATEX *mix = nullptr;
@@ -325,24 +352,25 @@ int main(int argc, char **argv)
 		is_float = IsEqualGUID(ext->SubFormat, subtype_float) != 0;
 	}
 	std::printf("%s / %u Hz / %u ch / %u bit %s\n", names[index].c_str(),
-	            rate, chans, bits, is_float ? "浮動小数" : "整数");
+	            rate, chans, bits, is_float ? CLI_T("float", "浮動小数") : CLI_T("integer", "整数"));
 
 	HANDLE ev = CreateEventA(nullptr, FALSE, FALSE, nullptr);
 	const REFERENCE_TIME dur = 10 * 1000 * 200;   // 200ms
 	HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
 	                                AUDCLNT_STREAMFLAGS_EVENTCALLBACK, dur, 0, mix, nullptr);
 	if (FAILED(hr)) {
-		std::fprintf(stderr, "初期化に失敗 (0x%08lx)\n", (unsigned long)hr);
+		std::fprintf(stderr, CLI_T("Initialization failed (0x%08lx)\n", "初期化に失敗 (0x%08lx)\n"), (unsigned long)hr);
 		return 1;
 	}
 	client->SetEventHandle(ev);
 	IAudioCaptureClient *cap = nullptr;
 	if (FAILED(client->GetService(__uuidof(IAudioCaptureClient), (void **)&cap))) {
-		std::fprintf(stderr, "取り込み口を作れない\n");
+		std::fprintf(stderr, CLI_T("Cannot create the capture client\n", "取り込み口を作れない\n"));
 		return 1;
 	}
 
 	std::vector<short> pcm;
+	std::vector<float> fpcm;       // --float のとき（受け取った値をそのまま）
 	pcm.reserve(size_t(seconds * rate) * 2);
 	const size_t want = size_t(seconds * rate);
 	size_t got = 0;
@@ -384,6 +412,10 @@ int main(int argc, char **argv)
 				}
 				pcm.push_back(short(std::clamp(int(l * 32767.0f), -32768, 32767)));
 				pcm.push_back(short(std::clamp(int(r * 32767.0f), -32768, 32767)));
+				if (want_float) {
+					fpcm.push_back(l);
+					fpcm.push_back(r);
+				}
 			}
 			got += frames;
 			cap->ReleaseBuffer(frames);
@@ -395,8 +427,11 @@ int main(int argc, char **argv)
 	if (sender.joinable())
 		sender.join();
 
-	write_wav(wav, pcm, rate);
-	std::printf("書き出した: %s（%.2f 秒）\n", wav.c_str(), double(got) / rate);
+	if (want_float)
+		write_wav_float(wav, fpcm, rate);
+	else
+		write_wav(wav, pcm, rate);
+	std::printf(CLI_T("Wrote: %s (%.2f s)\n", "書き出した: %s（%.2f 秒）\n"), wav.c_str(), double(got) / rate);
 
 	cap->Release();
 	client->Release();

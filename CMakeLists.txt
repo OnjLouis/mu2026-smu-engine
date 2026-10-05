@@ -21,7 +21,10 @@ endif()
 # ---- Emulator core (same sources as SRCS in the Makefile) -------------------
 add_library(smu2000_core STATIC
   src/compat/compat.cpp
+  src/sampling.cpp
   src/smartmedia.cpp
+  src/card_fs.cpp
+  src/m2a.cpp
   src/mame/sound/swp30.cpp
   src/mame/sound/swp30_jit.cpp
   src/mame/video/hd44780.cpp
@@ -62,6 +65,9 @@ add_test(NAME verify COMMAND verify)
 add_executable(resampler_probe src/ui/resampler_probe.cpp)
 target_include_directories(resampler_probe PRIVATE src src/compat)
 add_test(NAME resampler_probe COMMAND resampler_probe)
+add_executable(rom_search_probe src/rom_search_probe.cpp)
+target_include_directories(rom_search_probe PRIVATE src src/compat)
+add_test(NAME rom_search_probe COMMAND rom_search_probe)
 
 # ---- Linux: live + VST3 + CLAP (needs ALSA) ----------------------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -74,9 +80,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     return()
   endif()
 
-  # Cairo + fontconfig for gdi_linux.cpp (panel drawing in gui and plug-ins),
-  # SDL3 for the gui window (Phase 2, doc/porting-linux-gui.md)
-  pkg_check_modules(CAIRO QUIET cairo fontconfig)
+  # fontconfig for the panel's CJK fonts, SDL3 for the gui window
+  pkg_check_modules(FONTCONFIG QUIET fontconfig)
   pkg_check_modules(SDL3 QUIET sdl3)
 
   add_executable(live src/live.cpp
@@ -98,7 +103,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     third_party/imgui/imgui_tables.cpp
     third_party/imgui/imgui_widgets.cpp)
   set(LINUX_PANEL_SRCS
-    src/compat/gdi_linux.cpp
     src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp
     src/ui/effects.cpp src/xg/model.cpp
     src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp
@@ -110,9 +114,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     src/vst3/automation.cpp src/vst3/view.cpp src/vst3/plug_window_linux.cpp
     ${LINUX_PANEL_SRCS} ${VST3_SDK_SRCS})
   target_include_directories(S-MU2000-vst3 PRIVATE src src/compat
-    third_party/vst3 third_party/imgui ${CAIRO_INCLUDE_DIRS})
+    third_party/vst3 third_party/imgui ${FONTCONFIG_INCLUDE_DIRS})
   target_link_libraries(S-MU2000-vst3 PRIVATE smu2000_core
-    ${ALSA_LIBRARIES} ${CAIRO_LIBRARIES} pthread dl)
+    ${ALSA_LIBRARIES} ${FONTCONFIG_LIBRARIES} pthread dl)
   set_target_properties(S-MU2000-vst3 PROPERTIES
     PREFIX "" SUFFIX ".so" OUTPUT_NAME "S-MU2000"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/S-MU2000.vst3/Contents/x86_64-linux")
@@ -128,9 +132,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     src/vst3/automation.cpp src/vst3/view.cpp src/vst3/plug_window_linux.cpp
     ${LINUX_PANEL_SRCS} ${VST3_SDK_SRCS})
   target_include_directories(S-MU2000-clap PRIVATE src src/compat
-    third_party/vst3 third_party/clap third_party/imgui ${CAIRO_INCLUDE_DIRS})
+    third_party/vst3 third_party/clap third_party/imgui ${FONTCONFIG_INCLUDE_DIRS})
   target_link_libraries(S-MU2000-clap PRIVATE smu2000_core
-    ${ALSA_LIBRARIES} ${CAIRO_LIBRARIES} pthread dl)
+    ${ALSA_LIBRARIES} ${FONTCONFIG_LIBRARIES} pthread dl)
   set_target_properties(S-MU2000-clap PROPERTIES
     PREFIX "" SUFFIX ".clap" OUTPUT_NAME "S-MU2000"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
@@ -146,9 +150,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(clapprobe PRIVATE smu2000_core dl)
 
   # gui (Phase 4: SDL3 window + PC editor windows, doc/porting-linux-gui.md)
-  if(CAIRO_FOUND AND SDL3_FOUND)
+  if(FONTCONFIG_FOUND AND SDL3_FOUND)
     add_executable(gui src/gui_linux.cpp
-      src/compat/gdi_linux.cpp
       src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp
       src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp
       src/ui/player.cpp src/xg/model.cpp
@@ -158,7 +161,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       src/ui/app_linux.cpp
       src/ui/pc_window_linux.cpp
       src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp
-      src/ui/part_shapes.cpp src/ui/master_editor.cpp
+      src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/sampling_editor.cpp
       ${IMGUI_CORE}
       third_party/imgui/backends/imgui_impl_sdl3.cpp
       third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
@@ -167,10 +170,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       src/ui/midi_in_linux.cpp
       src/ui/midi_out_linux.cpp)
     target_include_directories(gui PRIVATE src src/compat
-      third_party/imgui ${ALSA_INCLUDE_DIRS} ${CAIRO_INCLUDE_DIRS} ${SDL3_INCLUDE_DIRS})
+      third_party/imgui ${ALSA_INCLUDE_DIRS} ${FONTCONFIG_INCLUDE_DIRS} ${SDL3_INCLUDE_DIRS})
     target_link_libraries(gui PRIVATE smu2000_core
-      ${ALSA_LIBRARIES} ${CAIRO_LIBRARIES} ${SDL3_LIBRARIES} pthread dl)
+      ${ALSA_LIBRARIES} ${FONTCONFIG_LIBRARIES} ${SDL3_LIBRARIES} pthread dl)
   else()
-    message(STATUS "Cairo/SDL3 not found: skipping gui (needs libcairo2-dev libsdl3-dev)")
+    message(STATUS "fontconfig/SDL3 not found: skipping gui (needs libfontconfig-dev libsdl3-dev)")
   endif()
 endif()

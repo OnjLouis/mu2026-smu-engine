@@ -18,6 +18,13 @@
 
 #include "plug_window.h"
 
+#include "ui/fonts.h"      // ui::im::fonts, ImGui only -- NOT ui/draw_imgui.h,
+                           // which needs compat/gdi.h and so <windows.h> on
+                           // Windows, where `interface` is a macro for `struct`
+                           // and the SDK headers have a member by that name
+
+#include "imgui.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -38,7 +45,10 @@ plug_key plug_key_of_button(int button);
 class plug_view : public Steinberg::IPlugView
 {
 public:
-	explicit plug_view(engine &eng);
+	// owner は engine を持つプラグイン本体（VST3 の IEditController）。画面が生きている間は参照を
+	// 1 つ持って、本体（と engine）を先に消させない。ホストが画面より先に本体を手放しても、
+	// 画面のタイマーや removed() が消えた engine に触らないように（VST2 は自分で順番を守るので null）
+	explicit plug_view(engine &eng, Steinberg::FUnknown *owner = nullptr);
 	virtual ~plug_view();
 
 	// ---- FUnknown
@@ -62,17 +72,19 @@ public:
 	Steinberg::tresult PLUGIN_API canResize() override;
 	Steinberg::tresult PLUGIN_API checkSizeConstraint(Steinberg::ViewRect *rect) override;
 
-	// ---- Called by the platform window (view_win.cpp / view_mac.mm).
-	//
-	// `native` is whatever that platform paints into: an HDC on Windows, a
-	// CGContextRef on macOS.
+	// ---- Called by the platform window (view_win.cpp / view_mac.mm),
+	// already inside a frame: dl is the background draw list to paint into.
 	int  width() const { return m_w; }
 	int  height() const { return m_h; }
 	// 開く前の大きさ（VST2 は窓を作る前に聞いてくる）。1000 × (400 + 上の帯)
 	static int default_width();
 	static int default_height();
 
-	void repaint(void *native, int w, int h);
+	// The panel's fonts need an ImGui context and no open frame; the platform
+	// window calls this once its context is up (see panel::fonts_ready)
+	void fonts_ready();
+
+	void repaint(ImDrawList *dl, const ui::im::fonts &fonts, int w, int h);
 	void mouse_down(int x, int y);
 	void mouse_drag(int x, int y);
 	void mouse_up();
@@ -100,10 +112,11 @@ public:
 private:
 	void card_error(const std::string &err);           // log it and tell the user
 
-	struct impl;                            // the panel, and the Win32 backing store
+	struct impl;                            // the panel and its toolbar
 	std::unique_ptr<impl> m_impl;
 
 	engine &m_engine;
+	Steinberg::FUnknown *m_owner = nullptr;   // 参照を持っているプラグイン本体
 	plug_window *m_window = nullptr;
 
 	// When the card was last written back, in milliseconds

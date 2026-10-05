@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <link rel="icon" href="data:," />
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>S-MU2000 Live</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="nav"><a href="index.html">← S-MU2000 Web</a></div>
+        <h1>Live Playback</h1>
+        <p class="note">
+            Boots the synth in an AudioWorklet and plays it from WebMIDI inputs
+            (up to 4 ports, A–D) in realtime. You need ROMs extracted from
+            your own MU2000 (see
+            <a
+                href="https://github.com/tarboh/S-MU2000/blob/main/doc/manual.en.md#2-preparing-the-roms"
+                >Preparing the ROMs</a
+            >); they are stored locally in your browser and never uploaded
+            anywhere. Works best in the Firefox browser.
+        </p>
+
+        <div class="card">
+            <label class="btn" for="roms">Choose ROM folder…</label>
+            <input type="file" id="roms" webkitdirectory hidden />
+            <span id="romFolder" class="note">your roms/ directory</span>
+            <ul id="romList"></ul>
+            <div class="row">
+                <button class="btn" id="forgetRoms">Forget stored ROMs</button>
+            </div>
+            <p class="note">Picked ROMs are stored locally in this browser.</p>
+        </div>
+
+        <div class="card">
+            <div class="row">
+                <button class="btn primary" id="start" disabled>
+                    Boot synth
+                </button>
+                <button class="btn" id="panic" disabled>Panic</button>
+                <button class="btn" id="tone" disabled>Test tone</button>
+            </div>
+            <div class="row">
+                <label>
+                    <input type="checkbox" id="fastSynth" checked />
+                    Fast synth
+                </label>
+            </div>
+            <p class="note">
+                Not perfectly accurate, but true emulation requires a very
+                powerful PC. Takes effect when the synth boots and locks
+                afterwards.
+            </p>
+            <progress id="progress" max="1" value="0"></progress>
+            <span id="status"></span>
+        </div>
+
+        <div class="card">
+            <div class="row">
+                <button class="btn" id="midi" disabled>Enable MIDI</button>
+                <span id="midiState" class="note">no access</span>
+            </div>
+            <div id="devices"></div>
+        </div>
+
+        <div class="card">
+            <div class="ports">
+                <div class="port">
+                    <div class="dot" id="dot0"></div>
+                    <div>A</div>
+                    <div class="count" id="count0">0</div>
+                </div>
+                <div class="port">
+                    <div class="dot" id="dot1"></div>
+                    <div>B</div>
+                    <div class="count" id="count1">0</div>
+                </div>
+                <div class="port">
+                    <div class="dot" id="dot2"></div>
+                    <div>C</div>
+                    <div class="count" id="count2">0</div>
+                </div>
+                <div class="port">
+                    <div class="dot" id="dot3"></div>
+                    <div>D</div>
+                    <div class="count" id="count3">0</div>
+                </div>
+            </div>
+            <div id="lastMessage">no MIDI yet</div>
+        </div>
+
+        <script type="module">
+            import { init } from "./live.js";
+            init();
+        </script>
+    </body>
+</html>

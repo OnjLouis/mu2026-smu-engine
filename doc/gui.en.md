@@ -35,7 +35,7 @@ colours live in a text file, `panel.txt`. The procedure is in
 Left- or right-click the **card slot** (bottom left) for a menu. The top
 three entries are SmartMedia.
 
-* `Create a new SmartMedia and insert it` → 16 MB / 32 MB / 64 MB / 128 MB. Choose where to save it and an empty card file (`.img`) is created and inserted. Format it in the unit with `UTIL → CARD → Format` before use
+* `Create a new SmartMedia and insert it` → 16 MB / 32 MB / 64 MB / 128 MB. Choose where to save it and a card file (`.img`) is created and inserted. It comes formatted the same way `UTIL → CARD → Format` leaves a card, so it can be saved to right away. While a card is in, its edge shows in the panel's slot
 * `Insert SmartMedia...` inserts a card file made earlier
 * `Eject SmartMedia` writes back to the file, then ejects
 
@@ -79,6 +79,12 @@ The lower half of the same menu.
 * `Stop` stops and silences anything still ringing (All Note Off and damper release)
 
 * `Play ports 3 and 4 on top of A and B` / `Do not play ports 3 and 4` control how files with three or four ports are handled (below)
+* `Lighten heavy MIDI: thin pitch bends, drop Roland display data (unlike the real unit)` is off by default. The MU2000 firmware works through only about
+  1,500 pitch bends a second; a denser stream falls behind and catches up later, on the real unit as here. When on, the
+  player sends at most one bend every 4 ms per channel (the latest value), and the latest value before any note on that
+  channel. It also leaves out Roland SC display messages (`F0 41 dd 45 12 …`, text and bitmaps for the SC's screen): the
+  MU2000 does not use them, and songs that animate the SC screen send over 10 KB/s of them, more than the MU2000's USB
+  input takes. Remembered in gui.ini
 
 **Dropping a MIDI file on a window** also plays it (the panel window, or the
 editor, list and insertion-settings windows). If several are dropped, only

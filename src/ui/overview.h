@@ -25,6 +25,8 @@ public:
 	{
 		for (int i = 0; i < XG_PARTS; i++)
 			m_playing[i] = m_saved_rcv[i] = -1;
+		for (int &n : m_pc_note)
+			n = -1;
 	}
 
 	const wchar_t *title() const override
@@ -120,7 +122,7 @@ private:
 	               bool marker = false, int pc_low = -1);
 	// モジュレーションホイール（CC1）。カーソルを載せてホイールか、上下にドラッグで変える
 	// PC のキーボードで弾く（A W S E D F T G Y H U J K O L P ; が C から、Z / X でオクターブ）
-	void pc_keys(int slot, bridge &br);
+	void pc_keys(int part, int slot, bridge &br);
 	void release_pc_keys(bridge &br);
 	// 行を選ぶ。パートの音色の窓も同じパートに替える
 	void select_part(int part);
@@ -131,6 +133,14 @@ private:
 	// そのチャンネルへオールサウンドオフ）、戻すパートは覚えておいたチャンネルに戻す。
 	// 曲の XG リセットなどで受信チャンネルが書き換わったら、覚えを捨ててもう一度消す
 	void apply_mutes(xg::model &m, bridge &br);
+	// ミュートか、ほかのパートのソロで消えているか
+	bool silenced(int part) const
+	{
+		bool any_solo = false;
+		for (int p = 0; p < XG_PARTS; p++)
+			any_solo |= m_solo[p];
+		return m_mute[part] || (any_solo && !m_solo[part]);
+	}
 	// パートの欄の右端の M / S の印
 	void mute_buttons(int part, float x, float y, float w, float h);
 	void row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float h);
@@ -164,8 +174,11 @@ private:
 	int    m_playing[XG_PARTS];
 	int    m_playing_slot[XG_PARTS] = {};
 	// PC のキーボードで弾いている音（キーごと。-1 は鳴らしていない）と、その口×チャンネル
-	int    m_pc_note[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-	int    m_pc_slot[17] = {};
+	static constexpr int PC_KEYS = 37;   // A 段 12 + Q 段 12 + 数字の段 13
+	static constexpr int PC_MOD = 80;    // Shift を押している間のモジュレーション
+	int    m_pc_note[PC_KEYS];          // 鳴らしている鍵（-1 = なし）。作るときに -1 で埋める
+	int    m_pc_slot[PC_KEYS] = {};
+	int    m_pc_mod_part = 0, m_pc_mod_slot = -1;   // Shift でモジュレーションを上げた先（-1 = 上げていない）
 	int    m_pc_base = 60;                 // A の鍵（C3）
 	// モジュレーションホイールで送った値と時刻（RAM の写しが追いつくまではこちらを出す）。
 	// 帯のホイールとモジュレーションの絵（mod_cell）の両方から回すので共有する

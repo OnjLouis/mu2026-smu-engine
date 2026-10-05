@@ -3,12 +3,18 @@
 #include "svg.h"
 #include "png.h"
 
+#include "ui/draw_imgui.h"
+#include "ui/tex.h"
+
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <mapbox/earcut.hpp>
 
 namespace ui {
 
@@ -454,10 +460,305 @@ bool svg_art::load_text(const std::string &text)
 	return ok();
 }
 
-void svg_art::draw(HDC dc, const RECT &dst, double deg) const
+// ---- filling one shape ------------------------------------------------------
+//
+// The GDI build filled every subpath of a shape in a single PolyPolygon call
+// with ALTERNATE mode: a pixel is painted when an odd number of contours cover
+// it. ImGui has no multi-contour fill, so each painted region is triangulated
+// instead: every loop nested at an even depth paints (a root covers once),
+// minus the loops it directly contains. Same rule, by construction.
+//
+// The triangulation is earcut (third_party/earcut.hpp): outline plus holes in,
+// triangles out. Everything runs in SVG units, in doubles; the screen transform
+// happens once, at emission.
+//
+// Hole-free loops go straight to AddConcavePolyFilled, which is exactly what
+// that helper is good at. It must never see a loop with holes: with no ear to
+// clip it emits a fan from vertex zero instead of failing.
+
+struct fpt { double x, y; };
+
+struct floop {
+	std::vector<fpt> pts;
+	double area = 0;             // signed; y grows down, so > 0 is clockwise
+	int parent = -1;             // tightest containing loop, or -1
+	int depth = 0;               // nesting depth; even depths paint
+};
+
+// SVG units to screen pixels, applied once, at emission.
+struct fmap {
+	double ox, oy, k, cx, cy, cs, sn;
+	bool turn;
+	ImVec2 operator()(const fpt &q) const
+	{
+		double px = ox + q.x * k, py = oy + q.y * k;
+		if (turn) {
+			const double dx = px - cx, dy = py - cy;
+			px = cx + dx * cs - dy * sn;
+			py = cy + dx * sn + dy * cs;
+		}
+		return ImVec2(float(px), float(py));
+	}
+};
+
+static double floop_area(const std::vector<fpt> &p)
+{
+	double a = 0;
+	for (size_t i = 0; i < p.size(); i++) {
+		const fpt &u = p[i], &v = p[(i + 1) % p.size()];
+		a += u.x * v.y - v.x * u.y;
+	}
+	return a / 2;
+}
+
+static bool floop_contains(const std::vector<fpt> &p, fpt q)
+{
+	bool in = false;
+	for (size_t i = 0, j = p.size() - 1; i < p.size(); j = i++) {
+		const fpt &a = p[i], &b = p[j];
+		if ((a.y > q.y) != (b.y > q.y) &&
+		    q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x)
+			in = !in;
+	}
+	return in;
+}
+
+// Emit one triangulated region with ImGui's own antialiased fringe. boundary
+// holds the loops the region is bounded by -- the outline, then each hole --
+// hole -- all wound so the paint sits on the same side, which is what makes
+// one fringe routine serve both. tris indexes into verts; everything arrives
+// in SVG units and lands on pixels here, for the first and only time.
+static void floop_emit(ImDrawList *dl, const fmap &map,
+                       const std::vector<fpt> &verts,
+                       const std::vector<unsigned> &tris,
+                       const std::vector<std::vector<fpt>> &boundary, ImU32 col)
+{
+	if (tris.empty() || (col & IM_COL32_A_MASK) == 0)
+		return;
+	std::vector<ImVec2> xy;
+	xy.reserve(verts.size());
+	for (const fpt &v : verts)
+		xy.push_back(map(v));
+	std::vector<std::vector<ImVec2>> edge;
+	edge.reserve(boundary.size());
+	for (const auto &loop : boundary) {
+		edge.emplace_back();
+		for (const fpt &v : loop)
+			edge.back().push_back(map(v));
+	}
+	const ImVec2 uv = dl->_Data->TexUvWhitePixel;
+	if ((dl->Flags & ImDrawListFlags_AntiAliasedFill) == 0) {
+		const unsigned base = dl->_VtxCurrentIdx;
+		dl->PrimReserve(int(tris.size()), int(xy.size()));
+		for (const ImVec2 &v : xy) {
+			dl->_VtxWritePtr[0].pos = v;
+			dl->_VtxWritePtr[0].uv = uv;
+			dl->_VtxWritePtr[0].col = col;
+			dl->_VtxWritePtr++;
+		}
+		for (unsigned t : tris) {
+			dl->_IdxWritePtr[0] = ImDrawIdx(base + t);
+			dl->_IdxWritePtr++;
+		}
+		dl->_VtxCurrentIdx = ImDrawIdx(base + xy.size());
+		return;
+	}
+	const float AA_SIZE = dl->_FringeScale;
+	const ImU32 col_trans = col & ~IM_COL32_A_MASK;
+	size_t fringe_pts = 0;
+	for (const auto &loop : edge)
+		fringe_pts += loop.size();
+	const unsigned base = dl->_VtxCurrentIdx;
+	dl->PrimReserve(int(tris.size()) + int(fringe_pts) * 6,
+	                int(xy.size()) + int(fringe_pts) * 2);
+	for (const ImVec2 &v : xy) {
+		dl->_VtxWritePtr[0].pos = v;
+		dl->_VtxWritePtr[0].uv = uv;
+		dl->_VtxWritePtr[0].col = col;
+		dl->_VtxWritePtr++;
+	}
+	for (unsigned t : tris) {
+		dl->_IdxWritePtr[0] = ImDrawIdx(base + t);
+		dl->_IdxWritePtr++;
+	}
+	unsigned fringe = base + unsigned(xy.size());
+	for (const auto &loop : edge) {
+		const size_t m = loop.size();
+		if (m < 2)
+			continue;
+		std::vector<ImVec2> normals(m);
+		for (size_t i = 0; i < m; i++) {
+			const ImVec2 &p0 = loop[(i + m - 1) % m];
+			const ImVec2 &p1 = loop[i];
+			float dx = p1.x - p0.x, dy = p1.y - p0.y;
+			const float len = std::hypot(dx, dy);
+			if (len > 0) {
+				dx /= len;
+				dy /= len;
+			}
+			normals[i] = ImVec2(dy, -dx);
+		}
+		for (size_t i1 = 0; i1 < m; i1++) {
+			const size_t i0 = (i1 + m - 1) % m;
+			float dmx = (normals[i0].x + normals[i1].x) * 0.5f;
+			float dmy = (normals[i0].y + normals[i1].y) * 0.5f;
+			float d2 = dmx * dmx + dmy * dmy;
+			if (d2 < 0.25f) {
+				dmx = 0.0f;
+				dmy = 1.0f;
+			} else {
+				const float d = std::sqrt(d2);
+				dmx /= d;
+				dmy /= d;
+			}
+			dmx *= AA_SIZE * 0.5f;
+			dmy *= AA_SIZE * 0.5f;
+			const ImVec2 &q = loop[i1];
+			dl->_VtxWritePtr[0].pos = ImVec2(q.x - dmx, q.y - dmy);
+			dl->_VtxWritePtr[0].uv = uv;
+			dl->_VtxWritePtr[0].col = col;
+			dl->_VtxWritePtr++;
+			dl->_VtxWritePtr[0].pos = ImVec2(q.x + dmx, q.y + dmy);
+			dl->_VtxWritePtr[0].uv = uv;
+			dl->_VtxWritePtr[0].col = col_trans;
+			dl->_VtxWritePtr++;
+			const unsigned inner1 = fringe + unsigned(i1) * 2;
+			const unsigned inner0 = fringe + unsigned(i0) * 2;
+			dl->_IdxWritePtr[0] = ImDrawIdx(inner1);
+			dl->_IdxWritePtr[1] = ImDrawIdx(inner0);
+			dl->_IdxWritePtr[2] = ImDrawIdx(inner0 + 1);
+			dl->_IdxWritePtr[3] = ImDrawIdx(inner0 + 1);
+			dl->_IdxWritePtr[4] = ImDrawIdx(inner1 + 1);
+			dl->_IdxWritePtr[5] = ImDrawIdx(inner1);
+			dl->_IdxWritePtr += 6;
+		}
+		fringe += unsigned(m) * 2;
+	}
+	dl->_VtxCurrentIdx = ImDrawIdx(fringe);
+}
+
+// Paint one filled shape under the even-odd rule. tol is one square pixel in
+// SVG units: the triangulation check below refuses anything further out.
+static void floop_fill(ImDrawList *dl, const fmap &map, std::vector<floop> &loops,
+                       ImU32 col, double tol)
+{
+	if (loops.empty() || (col & IM_COL32_A_MASK) == 0)
+		return;
+	if (loops.size() == 1) {                   // no nesting to work out
+		const auto &p = loops[0].pts;
+		if (p.size() < 3)
+			return;
+		std::vector<ImVec2> xy;
+		for (const fpt &v : p)
+			xy.push_back(map(v));
+		dl->AddConcavePolyFilled(xy.data(), int(xy.size()), col);
+		return;
+	}
+	// Nesting, tightest container first: bounding boxes reject nearly every
+	// pair before the crossing test runs.
+	std::vector<double> box;
+	box.reserve(loops.size() * 4);
+	for (const floop &l : loops) {
+		double b[4] = { 1e30, 1e30, -1e30, -1e30 };
+		for (const fpt &q : l.pts) {
+			b[0] = std::min(b[0], q.x);
+			b[1] = std::min(b[1], q.y);
+			b[2] = std::max(b[2], q.x);
+			b[3] = std::max(b[3], q.y);
+		}
+		box.insert(box.end(), b, b + 4);
+	}
+	for (size_t i = 0; i < loops.size(); i++) {
+		const fpt probe = loops[i].pts[0];
+		for (size_t j = 0; j < loops.size(); j++) {
+			if (i == j)
+				continue;
+			if (probe.x < box[j * 4] || probe.x > box[j * 4 + 2] ||
+			    probe.y < box[j * 4 + 1] || probe.y > box[j * 4 + 3])
+				continue;
+			if (!floop_contains(loops[j].pts, probe))
+				continue;
+			if (loops[i].parent < 0 ||
+			    std::fabs(loops[j].area) < std::fabs(loops[loops[i].parent].area))
+				loops[i].parent = int(j);
+		}
+	}
+	for (size_t i = 0; i < loops.size(); i++) {
+		loops[i].depth = 0;
+		for (int p = loops[i].parent; p >= 0; p = loops[p].parent)
+			loops[i].depth++;
+	}
+	for (size_t i = 0; i < loops.size(); i++) {
+		// Even-odd: a root covers once, so it paints; each level of nesting
+		// flips it. Depth counts containers, so roots sit at zero and paint.
+		if (loops[i].depth % 2 != 0)
+			continue;                           // odd depth stays unpainted
+		// Clockwise on screen, the winding ImGui fringes for.
+		if (loops[i].area < 0)
+			std::reverse(loops[i].pts.begin(), loops[i].pts.end());
+		// The outline and its holes, as earcut wants them: one outer ring
+		// followed by the holes. Holes run the other way; the fringe below
+		// needs the same convention, so the normalized copies serve both.
+		using ring = std::vector<std::array<double, 2>>;
+		std::vector<ring> poly;
+		std::vector<std::vector<fpt>> boundary;
+		poly.reserve(loops.size());
+		boundary.push_back(loops[i].pts);
+		{
+			ring outer;
+			for (const fpt &v : loops[i].pts)
+				outer.push_back({ v.x, v.y });
+			poly.push_back(std::move(outer));
+		}
+		std::vector<size_t> holes;
+		for (size_t j = 0; j < loops.size(); j++)
+			if (loops[j].parent == int(i))
+				holes.push_back(j);
+		for (size_t h : holes) {
+			std::vector<fpt> hole = loops[h].pts;
+			if (floop_area(hole) > 0)
+				std::reverse(hole.begin(), hole.end());
+			ring hr;
+			for (const fpt &v : hole)
+				hr.push_back({ v.x, v.y });
+			poly.push_back(std::move(hr));
+			boundary.push_back(std::move(hole));
+		}
+		std::vector<unsigned> tris = mapbox::earcut<unsigned>(poly);
+		// Vertices in earcut's order: the outline, then each hole in turn.
+		// Same normalized copies as above, so every index lands correctly.
+		std::vector<fpt> verts;
+		for (const auto &loop : boundary)
+			for (const fpt &v : loop)
+				verts.push_back(v);
+		std::vector<ImVec2> flat0;
+		flat0.reserve(loops[i].pts.size());
+		for (const fpt &v : loops[i].pts)
+			flat0.push_back(map(v));
+		// The triangulation must account for the outline minus the holes, and
+		// nothing else. Anything else is refused in favour of the outline
+		// whole: visible where a hole fills in, but bounded -- never a spike.
+		double want = std::fabs(floop_area(loops[i].pts));
+		for (size_t h : holes)
+			want -= std::fabs(floop_area(loops[h].pts));
+		double got = 0;
+		for (size_t t = 0; t + 2 < tris.size(); t += 3) {
+			const unsigned a = tris[t], b = tris[t + 1], c = tris[t + 2];
+			if (a >= verts.size() || b >= verts.size() || c >= verts.size())
+				break;                          // corrupt output: fail the check below
+			got += std::fabs(floop_area({ verts[a], verts[b], verts[c] }));
+		}
+		if (tris.empty() || (want > 0 && std::fabs(got - want) > 0.02 * want + tol))
+			dl->AddConcavePolyFilled(flat0.data(), int(flat0.size()), col);
+		else
+			floop_emit(dl, map, verts, tris, boundary, col);
+	}
+}
+
+void svg_art::draw(ImDrawList *dl, const RECT &dst, double deg) const
 {
 	if (!m_mips.empty()) {
-		draw_image(dc, dst, deg);
+		draw_image(dl, dst, deg);
 		return;
 	}
 	if (m_shapes.empty())
@@ -466,104 +767,125 @@ void svg_art::draw(HDC dc, const RECT &dst, double deg) const
 	const double dw = double(dst.right - dst.left), dh = double(dst.bottom - dst.top);
 	if (dw <= 0 || dh <= 0)
 		return;
-	// 縦横比は保つ。余りは真ん中に
 	const double k = std::min(dw / m_vb[2], dh / m_vb[3]);
 	const double ox = dst.left + (dw - m_vb[2] * k) / 2 - m_vb[0] * k;
 	const double oy = dst.top  + (dh - m_vb[3] * k) / 2 - m_vb[1] * k;
 
-	// 回すときの軸は、当てはめた四角の真ん中
 	const double cx = (dst.left + dst.right) / 2.0;
 	const double cy = (dst.top + dst.bottom) / 2.0;
 	const double rad = deg * 3.14159265358979 / 180.0;
 	const double cs = std::cos(rad), sn = std::sin(rad);
 	const bool turn = (deg != 0.0);
 
-	std::vector<POINT> pts;
-	std::vector<INT>   counts;
+	std::vector<ImVec2> pts;
 
 	for (const shape &sh : m_shapes) {
-		pts.clear();
-		counts.clear();
-		for (const auto &sub : sh.subs) {
-			counts.push_back(INT(sub.size()));
-			for (const pt &q : sub) {
-				double px = ox + q.x * k, py = oy + q.y * k;
-				if (turn) {
-					const double dx = px - cx, dy = py - cy;
-					px = cx + dx * cs - dy * sn;
-					py = cy + dx * sn + dy * cs;
-				}
-				pts.push_back({ int(std::lround(px)), int(std::lround(py)) });
-			}
-		}
-		if (pts.empty())
-			continue;
-
 		if (sh.has_fill) {
-			HBRUSH b = CreateSolidBrush(sh.fill);
-			HGDIOBJ ob = SelectObject(dc, b);
-			HGDIOBJ op = SelectObject(dc, GetStockObject(NULL_PEN));
-			const int old = SetPolyFillMode(dc, ALTERNATE);
-			PolyPolygon(dc, pts.data(), counts.data(), INT(counts.size()));
-			SetPolyFillMode(dc, old);
-			SelectObject(dc, op);
-			SelectObject(dc, ob);
-			DeleteObject(b);
+			// The whole path at once, so the even-odd rule in floop_fill sees
+			// every contour together: filling them one by one would lose the
+			// holes, which is how the jacks came out as black discs. The loops
+			// stay in SVG units here; the screen transform happens once, at
+			// emission, so topology never sees a rounded pixel.
+			const fmap map{ ox, oy, k, cx, cy, cs, sn, turn };
+			const double step = 0.5 / k;         // half a screen pixel, in SVG units
+			std::vector<floop> loops;
+			for (const auto &sub : sh.subs) {
+				floop l;
+				for (const pt &q : sub) {
+					if (l.pts.empty() || l.pts.back().x != q.x || l.pts.back().y != q.y)
+						l.pts.push_back({ q.x, q.y });
+				}
+				// A flattened curve ends where it started, up to float dust: the
+				// last point is the moveto start recomputed through four
+				// Beziers. Leave it and the fringe normalizes a 1e-12 edge into
+				// a nick at the seam -- three o'clock on every circle. GDI
+				// never saw it: integer pixels collapse the edge to nothing.
+				if (l.pts.size() > 1) {
+					const fpt &a = l.pts.front(), &b = l.pts.back();
+					const double dx = b.x - a.x, dy = b.y - a.y;
+					if (dx * dx + dy * dy < 1e-18)
+						l.pts.pop_back();
+				}
+				// Curves arrive flattened far past the pixel grid: a pin is a
+				// hundred points for five pixels. The triangulator chokes on
+				// vertices it cannot tell apart, so keep a vertex only when it
+				// moves half a pixel. Anything this erases was invisible.
+				if (l.pts.size() > 16) {
+					std::vector<fpt> thin;
+					thin.reserve(l.pts.size());
+					thin.push_back(l.pts.front());
+					for (size_t t = 1; t < l.pts.size(); t++) {
+						const fpt &a = thin.back(), &b = l.pts[t];
+						const double dx = b.x - a.x, dy = b.y - a.y;
+						if (dx * dx + dy * dy >= step * step)
+							thin.push_back(b);
+					}
+					// The seam too: a last point a hair from the first makes a
+					// micro-edge whose fringe normal points anywhere -- the
+					// nick at three o'clock, where every circle starts.
+					while (thin.size() > 3) {
+						const fpt &a = thin.front(), &b = thin.back();
+						const double dx = b.x - a.x, dy = b.y - a.y;
+						if (dx * dx + dy * dy >= step * step)
+							break;
+						thin.pop_back();
+					}
+					if (thin.size() >= 3)
+						l.pts.swap(thin);
+				}
+				if (l.pts.size() >= 3) {
+					l.area = floop_area(l.pts);
+					if (l.area != 0)
+						loops.push_back(std::move(l));
+				}
+			}
+			floop_fill(dl, map, loops, im::col(sh.fill), 1.0 / (k * k));
 		}
 		if (sh.has_stroke) {
-			HPEN pen = CreatePen(PS_SOLID, std::max(1, int(sh.stroke_w * k + 0.5)),
-			                     sh.stroke);
-			HGDIOBJ op = SelectObject(dc, pen);
-			size_t at = 0;
-			for (size_t i = 0; i < counts.size(); i++) {
-				Polyline(dc, pts.data() + at, counts[i]);
-				if (sh.closed[i] && counts[i] >= 2) {
-					MoveToEx(dc, pts[at + counts[i] - 1].x, pts[at + counts[i] - 1].y,
-					         nullptr);
-					LineTo(dc, pts[at].x, pts[at].y);
+			const float w = float(std::max(1, int(sh.stroke_w * k + 0.5)));
+			for (size_t i = 0; i < sh.subs.size(); i++) {
+				pts.clear();
+				for (const pt &q : sh.subs[i]) {
+					double px = ox + q.x * k, py = oy + q.y * k;
+					if (turn) {
+						const double dx = px - cx, dy = py - cy;
+						px = cx + dx * cs - dy * sn;
+						py = cy + dx * sn + dy * cs;
+					}
+					pts.emplace_back(float(px), float(py));
 				}
-				at += size_t(counts[i]);
+				if (pts.size() < 2)
+					continue;
+				const ImU32 c = im::col(sh.stroke);
+				if (sh.closed[i] && pts.size() >= 2) {
+					// Closed joins the last point back to the first itself; also
+					// appending the first point makes a zero-length edge whose
+					// join spikes -- the nick at three o'clock, where every
+					// circle starts. GDI drew the closing segment by hand from
+					// last to first, which has the same shape without one.
+					while (pts.size() > 1) {
+						const ImVec2 &a = pts.back(), &b = pts.front();
+						const double dx = double(a.x) - b.x, dy = double(a.y) - b.y;
+						if (dx * dx + dy * dy > 1e-12)
+							break;
+						pts.pop_back();
+					}
+					dl->AddPolyline(pts.data(), int(pts.size()), c, ImDrawFlags_Closed, w);
+				} else {
+					dl->AddPolyline(pts.data(), int(pts.size()), c, 0, w);
+				}
 			}
-			SelectObject(dc, op);
-			DeleteObject(pen);
 		}
 	}
 }
 
 
 // ---- 画像のとき
-
-void blit_premul(HDC dc, int x, int y, int w, int h, const uint32_t *px, bool opaque)
-{
-#if defined(_WIN32)
-	BITMAPINFO bi{};
-	bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-	bi.bmiHeader.biWidth = w;
-	bi.bmiHeader.biHeight = -h;                        // 上から下へ
-	bi.bmiHeader.biPlanes = 1;
-	bi.bmiHeader.biBitCount = 32;
-	bi.bmiHeader.biCompression = BI_RGB;
-	if (opaque) {
-		StretchDIBits(dc, x, y, w, h, 0, 0, w, h, px, &bi, DIB_RGB_COLORS, SRCCOPY);
-		return;
-	}
-	void *bits = nullptr;
-	HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-	if (!bm)
-		return;
-	std::memcpy(bits, px, size_t(w) * size_t(h) * 4);
-	HDC mem = CreateCompatibleDC(dc);
-	HGDIOBJ old = SelectObject(mem, bm);
-	BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-	GdiAlphaBlend(dc, x, y, w, h, mem, 0, 0, w, h, bf);
-	SelectObject(mem, old);
-	DeleteDC(mem);
-	DeleteObject(bm);
-#else
-	(void)opaque;
-	smu_blit_premul(dc, x, y, w, h, px);
-#endif
-}
+//
+// GDI のときは出来上がりの 1 枚を DIB にして AlphaBlend で貼っていた。
+// ここでは同じ 1 枚を ImGui のテクスチャに置いてから AddImageQuad で置くだけ
+// （im::tex が contexts ごと TextureData を持ってくれるので、
+// DX11 / Metal / SDL_gpu のどれでも同じ 3 行で済む）
 
 namespace {
 
@@ -573,6 +895,19 @@ uint32_t premul(uint32_t c)
 	if (a == 255)
 		return c;
 	auto m = [&](int sh) { return (((c >> sh) & 0xff) * a + 127) / 255; };
+	return (a << 24) | (m(16) << 16) | (m(8) << 8) | m(0);
+}
+
+// α を戻す。ミップと補間はかけたまま（错的でない）行い、テクスチャへ渡す
+// 1 枚だけ戻す。DX11 / Metal / SDLRenderer はどれも SRC_ALPHA 合成
+uint32_t unpremul(uint32_t c)
+{
+	const uint32_t a = c >> 24;
+	if (a == 255 || a == 0)
+		return a == 0 ? 0u : c;
+	auto m = [&](int sh) {
+		return std::min<uint32_t>(255, (((c >> sh) & 0xff) * 255 + a / 2) / a);
+	};
 	return (a << 24) | (m(16) << 16) | (m(8) << 8) | m(0);
 }
 
@@ -586,6 +921,15 @@ bool svg_art::load_png(const std::string &path)
 	if (!read_png(path, w, h, raw))
 		return false;
 	return load_pixels(w, h, raw);
+}
+
+// Set SMU_NATIVE_TEXTURES=1 to force native upload (A/B testing); unset or
+// "0" follows the ratio below. Presence alone used to force it, which made
+// =0 lie -- the value is what counts.
+static bool svg_force_native()
+{
+	const char *v = std::getenv("SMU_NATIVE_TEXTURES");
+	return v && v[0] != '\0' && !(v[0] == '0' && v[1] == '\0');
 }
 
 bool svg_art::load_pixels(int w, int h, const std::vector<uint32_t> &raw)
@@ -602,29 +946,32 @@ bool svg_art::load_pixels(int w, int h, const std::vector<uint32_t> &raw)
 		l0.px[i] = premul(raw[i]);
 	m_mips.push_back(std::move(l0));
 
-	// 半分ずつ縮めた段。2 × 2 の平均（端の余りは端の画素を使い回す）
-	while (m_mips.back().w > 1 || m_mips.back().h > 1) {
-		const level &a = m_mips.back();
-		level b;
-		b.w = std::max(1, (a.w + 1) / 2);
-		b.h = std::max(1, (a.h + 1) / 2);
-		b.px.resize(size_t(b.w) * size_t(b.h));
-		for (int y = 0; y < b.h; y++)
-			for (int x = 0; x < b.w; x++) {
-				const int x0 = std::min(2 * x, a.w - 1), x1 = std::min(2 * x + 1, a.w - 1);
-				const int y0 = std::min(2 * y, a.h - 1), y1 = std::min(2 * y + 1, a.h - 1);
-				const uint32_t q[4] = { a.px[size_t(y0) * a.w + x0], a.px[size_t(y0) * a.w + x1],
-				                        a.px[size_t(y1) * a.w + x0], a.px[size_t(y1) * a.w + x1] };
-				uint32_t out = 0;
-				for (int sh = 0; sh < 32; sh += 8) {
-					uint32_t sum = 0;
-					for (uint32_t v : q)
-						sum += (v >> sh) & 0xff;
-					out |= ((sum + 2) / 4) << sh;
+	// 半分ずつ縮めた段。2 × 2 の平均（端の余りは端の画素を使い回す）。
+	// 縮小側だけ要るので、SMU_NATIVE_TEXTURES=1 では作らない
+	if (!svg_force_native()) {
+		while (m_mips.back().w > 1 || m_mips.back().h > 1) {
+			const level &a = m_mips.back();
+			level b;
+			b.w = std::max(1, (a.w + 1) / 2);
+			b.h = std::max(1, (a.h + 1) / 2);
+			b.px.resize(size_t(b.w) * size_t(b.h));
+			for (int y = 0; y < b.h; y++)
+				for (int x = 0; x < b.w; x++) {
+					const int x0 = std::min(2 * x, a.w - 1), x1 = std::min(2 * x + 1, a.w - 1);
+					const int y0 = std::min(2 * y, a.h - 1), y1 = std::min(2 * y + 1, a.h - 1);
+					const uint32_t q[4] = { a.px[size_t(y0) * a.w + x0], a.px[size_t(y0) * a.w + x1],
+					                        a.px[size_t(y1) * a.w + x0], a.px[size_t(y1) * a.w + x1] };
+					uint32_t out = 0;
+					for (int sh = 0; sh < 32; sh += 8) {
+						uint32_t sum = 0;
+						for (uint32_t v : q)
+							sum += (v >> sh) & 0xff;
+						out |= ((sum + 2) / 4) << sh;
+					}
+					b.px[size_t(y) * b.w + x] = out;
 				}
-				b.px[size_t(y) * b.w + x] = out;
-			}
-		m_mips.push_back(std::move(b));
+			m_mips.push_back(std::move(b));
+		}
 	}
 	m_vb[0] = m_vb[1] = 0;
 	m_vb[2] = w;
@@ -632,31 +979,72 @@ bool svg_art::load_pixels(int w, int h, const std::vector<uint32_t> &raw)
 	return true;
 }
 
-void svg_art::draw_image(HDC dc, const RECT &dst, double deg) const
+void svg_art::release_gpu() const
+{
+	delete static_cast<im::tex *>(m_cache.gpu);
+	m_cache.gpu = nullptr;
+}
+
+// The texture is the picture resampled to about the size it gets drawn at, so
+// the GPU does not have to minify it: ImGui textures have no mipmaps, and the
+// panel background is 2000 px wide landing in about 700, which would shimmer.
+// The downscaling itself is load_pixels' 2x2 box filter, one mip level at a
+// time. Rounding the size *down* to a multiple of this keeps the texture just
+// under its destination, so the GPU magnifies a little or lands 1:1 -- the
+// harmless direction, and less memory than rounding up would take.
+static constexpr int SIZE_GRAIN = 1;
+static int grain(int px) { return std::max(SIZE_GRAIN, px / SIZE_GRAIN * SIZE_GRAIN); }
+
+void svg_art::draw_image(ImDrawList *dl, const RECT &dst, double deg) const
 {
 	const int dw = dst.right - dst.left, dh = dst.bottom - dst.top;
-	if (dw <= 0 || dh <= 0)
+	if (dw <= 0 || dh <= 0 || m_mips.empty())
 		return;
+	const level &base = m_mips[0];
 
-	if (m_cache.w != dw || m_cache.h != dh || m_cache.deg != deg || m_cache.px.empty()) {
-		const level &base = m_mips[0];
-		// 縦横比は保つ。余りは真ん中に
-		const double k = std::min(double(dw) / base.w, double(dh) / base.h);
-		const double ix0 = (dw - base.w * k) / 2, iy0 = (dh - base.h * k) / 2;
+	// Where the picture sits inside dst: aspect kept, centered
+	const double k = std::min(double(dw) / base.w, double(dh) / base.h);
+	const double pw = base.w * k, ph = base.h * k;
+	const double cx = (dst.left + dst.right) * 0.5, cy = (dst.top + dst.bottom) * 0.5;
+	const double x0 = cx - pw / 2, y0 = cy - ph / 2;
 
-		// 1 画素が元の 1-2 画素に当たる段を選ぶ
-		double s = 1.0 / k;
-		size_t li = 0;
-		while (li + 1 < m_mips.size() && s >= 2.0) {
-			s /= 2.0;
-			li++;
+	// Minify a lot and the GPU needs help (it has no mipmaps to fall back
+	// on); otherwise the bytes go over unchanged. Sizes below are device
+	// pixels, so a 2x display gets full-res bytes where a point-size target
+	// would have halved them away. The line sits below what any test has
+	// needed: resample won at 0.2, native at 0.435 and everywhere above, so
+	// the line below keeps both with margin on each side.
+	// SMU_NATIVE_TEXTURES=1 forces the native side, for A/B testing.
+	static constexpr double NATIVE_MIN_RATIO = 0.3;
+	ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+	if (fb.x <= 0 || fb.y <= 0)
+		fb = ImVec2(1, 1);
+	const int tw = grain(int(std::ceil(pw * fb.x)));
+	const int th = grain(int(std::ceil(ph * fb.y)));
+	const bool native = svg_force_native() ||
+	                    std::min(double(tw) / base.w, double(th) / base.h) >= NATIVE_MIN_RATIO;
+
+	im::tex *t = static_cast<im::tex *>(m_cache.gpu);
+	if (!t) {
+		t = new im::tex;
+		m_cache.gpu = t;
+	}
+	if (native) {
+		// Native bytes, GPU scales. Upload once; resizes never touch it.
+		if (!t->valid() || m_cache.w != base.w || m_cache.h != base.h) {
+			std::vector<uint32_t> px(size_t(base.w) * size_t(base.h));
+			for (size_t i = 0; i < px.size(); i++)
+				px[i] = unpremul(base.px[i]);
+			m_cache.w = base.w;
+			m_cache.h = base.h;
+			t->upload(base.w, base.h, px);
 		}
+	} else if (!t->valid() || m_cache.w != tw || m_cache.h != th) {
+		// 一番深い段（1/2, 1/4 …）から、足りる 段まで戻る
+		size_t li = 0;
+		while (li + 1 < m_mips.size() && m_mips[li + 1].w >= tw)
+			li++;
 		const level &L = m_mips[li];
-		const double to_l = 1.0 / double(1u << li);
-
-		const double cx = dw / 2.0, cy = dh / 2.0;
-		const double rad = deg * 3.14159265358979 / 180.0;
-		const double cs = std::cos(rad), sn = std::sin(rad);
 
 		auto fetch = [&](int x, int y) -> uint32_t {
 			x = std::max(0, std::min(x, L.w - 1));
@@ -664,41 +1052,65 @@ void svg_art::draw_image(HDC dc, const RECT &dst, double deg) const
 			return L.px[size_t(y) * L.w + x];
 		};
 
-		m_cache.w = dw;
-		m_cache.h = dh;
-		m_cache.deg = deg;
-		m_cache.px.assign(size_t(dw) * size_t(dh), 0);
-		bool opaque = true;
-		for (int y = 0; y < dh; y++)
-			for (int x = 0; x < dw; x++) {
-				double px = x + 0.5, py = y + 0.5;
-				if (deg != 0.0) {
-					// 描くときに回すのと逆向きに戻して、元の絵のどこかを探す
-					const double dx = px - cx, dy = py - cy;
-					px = cx + dx * cs + dy * sn;
-					py = cy - dx * sn + dy * cs;
-				}
-				const double u = (px - ix0) / k, v = (py - iy0) / k;
+		std::vector<uint32_t> px(size_t(tw) * size_t(th), 0);
+		for (int y = 0; y < th; y++)
+			for (int x = 0; x < tw; x++) {
+				const double u = (x + 0.5) * L.w / tw - 0.5;
+				const double v = (y + 0.5) * L.h / th - 0.5;
+				const int ix = int(std::floor(u)), iy = int(std::floor(v));
+				const double tx = u - ix, ty = v - iy;
+				const uint32_t a = fetch(ix, iy), b = fetch(ix + 1, iy);
+				const uint32_t c = fetch(ix, iy + 1), d = fetch(ix + 1, iy + 1);
 				uint32_t out = 0;
-				if (u >= 0 && v >= 0 && u < base.w && v < base.h) {
-					const double fu = u * to_l - 0.5, fv = v * to_l - 0.5;
-					const int x0 = int(std::floor(fu)), y0 = int(std::floor(fv));
-					const double tx = fu - x0, ty = fv - y0;
-					const uint32_t a = fetch(x0, y0), b = fetch(x0 + 1, y0);
-					const uint32_t c = fetch(x0, y0 + 1), d = fetch(x0 + 1, y0 + 1);
-					for (int sh = 0; sh < 32; sh += 8) {
-						const double top = ((a >> sh) & 0xff) * (1 - tx) + ((b >> sh) & 0xff) * tx;
-						const double bot = ((c >> sh) & 0xff) * (1 - tx) + ((d >> sh) & 0xff) * tx;
-						out |= uint32_t(std::lround(top * (1 - ty) + bot * ty)) << sh;
-					}
+				for (int sh = 0; sh < 32; sh += 8) {
+					const double top = ((a >> sh) & 0xff) * (1 - tx) + ((b >> sh) & 0xff) * tx;
+					const double bot = ((c >> sh) & 0xff) * (1 - tx) + ((d >> sh) & 0xff) * tx;
+					out |= uint32_t(std::lround(top * (1 - ty) + bot * ty)) << sh;
 				}
-				if ((out >> 24) != 255)
-					opaque = false;
-				m_cache.px[size_t(y) * dw + x] = out;
+				// 補間はかけたまま（错的でない）して、ここだけ戻して texture へ
+				px[size_t(y) * tw + x] = unpremul(out);
 			}
-		m_cache.opaque = opaque;
+		m_cache.w = tw;
+		m_cache.h = th;
+		t->upload(tw, th, px);
 	}
-	blit_premul(dc, dst.left, dst.top, dw, dh, m_cache.px.data(), m_cache.opaque);
+	if (!t->valid())
+		return;                        // context が無い（描く先が無い）
+
+	// 角度を付けて 4 隅を置く。deg を 0 にするとただの AddImageQuad と同じ。
+	// 回すのは絵ではなくこの四角の 4 隅なので、つまみを回してもテクスチャは
+	// 一切触らない（GDI ではここに絵を焼き直していた）
+	const double rad = deg * 3.14159265358979 / 180.0;
+	const double cs = std::cos(rad), sn = std::sin(rad);
+	auto corner = [&](double x, double y) {
+		const double dx = x - cx, dy = y - cy;
+		return ImVec2(float(cx + dx * cs - dy * sn), float(cy + dx * sn + dy * cs));
+	};
+	// The picture goes out as a grid of quads, each at most this big. A single
+	// large textured quad does not survive the trip: through SDL_Renderer only
+	// one of its two triangles reached the screen, so the panel art showed up
+	// cut along the diagonal from the top-left to the bottom-right corner. The
+	// command data is right -- the indices, the four corners and the texture
+	// all check out when dumped from inside the backend -- and it is
+	// size-dependent, so it is a rasterizer limit rather than something the
+	// draw list got wrong: a 1335x514 quad loses a triangle, 1335x257 and
+	// 664x514 do not. Same code, same texture, same frame; only the quad is
+	// smaller. Tiles cost a handful of extra quads and they all share one
+	// texture, so they still go out in a single command.
+	static constexpr float TILE = 256.0f;
+	const int nx = std::max(1, int(std::ceil(pw / TILE)));
+	const int ny = std::max(1, int(std::ceil(ph / TILE)));
+	for (int j = 0; j < ny; j++) {
+		for (int i = 0; i < nx; i++) {
+			const double xa = x0 + pw * i / nx, xb = x0 + pw * (i + 1) / nx;
+			const double ya = y0 + ph * j / ny, yb = y0 + ph * (j + 1) / ny;
+			const ImVec2 ua(float(i) / float(nx), float(j) / float(ny));
+			const ImVec2 ub(float(i + 1) / float(nx), float(j + 1) / float(ny));
+			dl->AddImageQuad(t->ref(),
+			                 corner(xa, ya), corner(xb, ya), corner(xb, yb), corner(xa, yb),
+			                 ua, ImVec2(ub.x, ua.y), ub, ImVec2(ua.x, ub.y));
+		}
+	}
 }
 
 } // namespace ui

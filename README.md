@@ -4,9 +4,12 @@
 
 A software tone generator modeled on the Yamaha MU2000, designed to be played as a plug-in inside a DAW.
 
+**[Try it out in your browser!](https://tarboh.github.io/S-MU2000/) _Note: needs ROMs extracted from your own MU2000_.**
+
 ![Screenshot](doc/mu_screenshot.png)
 
-**Current state: runs as VST3 / CLAP (Windows) and VST3 / Audio Unit (macOS), with a hardware-style front-panel screen plus a mouse-and-keyboard editor.**
+**Current state: runs as VST3 / CLAP (Windows, [Linux](#building-on-linux)) and VST3 / Audio Unit (macOS), with a hardware-style front-panel screen plus a mouse-and-keyboard editor.**
+
 
 This project is developed in the open, work-in-progress and all. On X, follow `#S_MU2000`.
 
@@ -84,6 +87,12 @@ Place the following in the `rom` directory:
 | `dump/xv364a0.ic49` and 3 more | Wave ROM, 8 MB × 4                      |
 | `standin/sin-table.bin`        | 64 KB sine table used by the MEG        |
 
+The GUI and the plug-ins look for this directory in the same places (the `S_MU2000_ROMS` environment
+variable, the settings folder's `roms` or a `roms.txt` there naming the folder, next to the program, …).
+**Starting the GUI without a folder** (double-clicking it, say) searches those places, and if nothing is
+found it asks you to choose the folder and writes it to `roms.txt` in the settings folder, so from then on
+the GUI and the plug-ins both find the ROMs.
+
 * You **don't need to dump the program ROM**. It can be reconstructed from Yamaha's published
   updater (`mu2r1_uw.zip`). The contents are a MIDI file of Flash-write SysEx messages as-is,
   which reassemble to the SHA1 registered in MAME.
@@ -126,6 +135,10 @@ build/render.exe <rom directory> <MIDI> <output wav> [seconds]  Render a file to
                  [--usb]                            Start on USB ports, routing song ports 1-4 to A-D
                  [--fast-midi]                      Deliver MIDI as fast as the firmware can read
                  [--card image.img] [--adc-in input.wav]  Insert SmartMedia / feed A/D INPUT
+                 [--sample-rate Hz] [--bit-depth 8|16|24|32]  Output format (default 44100 Hz, 16-bit; 32 is float)
+                 [--gain x] [--normalize]           Scale the level / use the full range
+                                                    Run a tool with no arguments for the full list of options;
+                                                    add -jp for messages in Japanese
 build/panel.exe  <rom directory> [--keys "play,edit"] [--list]  Drive the panel as text only
 build/boot.exe   <rom directory> [cycles]           Boot check
 build/statetest.exe <rom directory> [MIDI]          Check that state save/restore is exact

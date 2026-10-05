@@ -26,6 +26,7 @@
 #include "ui/pc_window.h"
 
 #include "ui/lang.h"
+#include "ui/font_file.h"
 #include "ui/texts.h"
 
 #import <Cocoa/Cocoa.h>
@@ -514,44 +515,6 @@ NSString *title_of(const ui::imgui_view &view)
 	return [NSString stringWithUTF8String:utf8.c_str()];
 }
 
-// The Japanese font, found **by name** rather than by path. macOS keeps its
-// fonts in files whose names are not the names people know them by, and the
-// ones in /System are not to be named in a path anyway: ask CoreText which
-// file holds the family, and hand that to ImGui's rasterizer. The Windows side
-// looks up YuGothM / meiryo / msgothic in turn; this is the same idea with the
-// families macOS ships
-std::string font_path_by_name(const char *name)
-{
-	CFStringRef family = CFStringCreateWithCString(nullptr, name, kCFStringEncodingUTF8);
-	if (!family)
-		return {};
-	// The type callbacks **retain** the family string. With no callbacks the
-	// dictionary would hold a borrowed reference, and releasing it right after
-	// would leave the descriptor matching against freed memory (it did)
-	const void *keys[]   = { kCTFontFamilyNameAttribute };
-	const void *values[] = { family };
-	CFDictionaryRef attrs = CFDictionaryCreate(nullptr, keys, values, 1,
-	                                           &kCFTypeDictionaryKeyCallBacks,
-	                                           &kCFTypeDictionaryValueCallBacks);
-	CFRelease(family);                       // the dictionary owns one now
-	if (!attrs)
-		return {};
-	CTFontDescriptorRef desc = CTFontDescriptorCreateWithAttributes(attrs);
-	CFRelease(attrs);
-	if (!desc)
-		return {};
-	CFURLRef url = (CFURLRef)CTFontDescriptorCopyAttribute(desc, kCTFontURLAttribute);
-	CFRelease(desc);
-	std::string out;
-	if (url) {
-		char buf[PATH_MAX] = {};
-		if (CFURLGetFileSystemRepresentation(url, true, (UInt8 *)buf, sizeof(buf)))
-			out = buf;
-		CFRelease(url);
-	}
-	return out;
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -652,19 +615,10 @@ bool pc_window::create(std::string &err)
 	ImGuiStyle &st = ImGui::GetStyle();
 	st.FrameRounding = 3;
 
-	// Japanese-capable fonts, found **by name** (never hard-coding a path into /System)
-	static const char *const FONTS[] = {
-		"Hiragino Sans",                // Hiragino Kaku Gothic, known by this name since 10.15
-		"Hiragino Kaku Gothic ProN",
-		"Hiragino Kaku Gothic Pro",
-		"Hiragino Sans GB",
-		"Osaka",
-	};
-	for (const char *name : FONTS) {
-		const std::string path = font_path_by_name(name);
-		if (!path.empty() && io.Fonts->AddFontFromFileTTF(path.c_str(), 16.0f))
-			break;
-	}
+	// The one shared font setup: ui/font_file.h asks CoreText for a face by
+	// family name (never a hard-coded path into /System), checks it can draw
+	// what the panel writes, and reads it once.
+	add_cjk_ui_font(io.Fonts);
 
 	ImGui_ImplMetal_Init(h->dev);
 	h->view->_ctx = m_imgui;

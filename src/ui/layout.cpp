@@ -1,7 +1,7 @@
 // license:BSD-3-Clause
 
 #include "layout.h"
-#include "draw.h"
+#include "compat/gdi.h"
 #include "texts.h"
 #include "compat/paths.h"
 
@@ -181,7 +181,7 @@ layout::layout()
 	const double cd[4] = { 57, 336, 201, 21 };
 	const double ad[4] = { 8, 44, 60, 130 };
 	const double ph[4] = { 198, 238, 74, 82 };   // 丸と下の札。組み込みの絵（丸 228, 269）と art/mame の絵（丸 251, 257）の両方に当たる
-	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; phones[i] = ph[i]; }
+	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; phones[i] = ph[i]; card_slot[i] = 0; }
 
 	// ---- 飾り。実機の写真から採寸した
 	bool ok = false;
@@ -437,6 +437,7 @@ bool layout::load(const std::string &path, std::string &err)
 		else if (key == "lcd.frame") { if (need(2)) lcd_frame = num(t[1]) != 0; }
 		else if (key == "plg")    { if (need(4)) for (int i = 0; i < 3; i++) plg[i] = num(t[1 + i]); }
 		else if (key == "card")   { if (need(5)) for (int i = 0; i < 4; i++) card[i] = num(t[1 + i]); }
+		else if (key == "card.slot") { if (need(5)) for (int i = 0; i < 4; i++) card_slot[i] = num(t[1 + i]); }
 		else if (key == "adin")   { if (need(5)) for (int i = 0; i < 4; i++) adin[i] = num(t[1 + i]); }
 		else if (key == "phones") { if (need(5)) for (int i = 0; i < 4; i++) phones[i] = num(t[1 + i]); }
 		else if (key == "low.x")  { if (need(12)) for (int i = 0; i < 11; i++) low_x[i] = num(t[1 + i]); }
@@ -569,6 +570,9 @@ bool layout::save(const std::string &path) const
 	             plg[0], plg[1], plg[2]);
 	std::fprintf(f, "card %g %g %g %g   # カードの差し込み口。右クリックで MIDI ファイル\n",
 	             card[0], card[1], card[2], card[3]);
+	if (card_slot[2] > 0)
+		std::fprintf(f, "card.slot %g %g %g %g   # 差し込み口の開いた所。カードが差さっていると縁を描く\n",
+		             card_slot[0], card_slot[1], card_slot[2], card_slot[3]);
 	std::fprintf(f, "adin %g %g %g %g     # A/D INPUT のジャック\n",
 	             adin[0], adin[1], adin[2], adin[3]);
 	std::fprintf(f, "phones %g %g %g %g   # PHONES のジャック。押すと音の出口（デジタル / アナログ）の品書き\n",
@@ -656,23 +660,38 @@ std::string layout::find_default()
 				return q;
 		}
 	}
-	// 3. 設定の置き場
+	// 3. The per-user data directory, which is where roms/ and the .ini files
+	//    already live, so it is the most natural place to keep a panel: a
+	//    panel.txt of its own, plus panel/ (the same name the bundles use under
+	//    Resources) and art/real/ with the pictures beside it. It sits above
+	//    the bundle art on purpose, so a copy kept here overrides what shipped.
+	//    It is also the only place a **one-file** plug-in format can keep
+	//    artwork at all: a lone .clap or .dll has no bundle to put
+	//    Resources/panel in, so step 5 below can never reach it.
 	{
 		const std::string dir = smu2000::config_dir();
 		if (!dir.empty()) {
-			const std::string q = dir + "panel.txt";
-			if (exists(q))
-				return q;
+			for (const std::string &n : { std::string("panel.txt"),
+			                              std::string("panel/panel.txt"),
+			                              std::string("art/real/panel.txt") })
+				if (exists(dir + n))
+					return dir + n;
 		}
 	}
-	// 4. 付属の写真調の絵（art/real）。exe の横、build/ から見た上、いまいる場所
+	// 4. 付属の写真調の絵（art/real）。exe の横、build/ から見た上、いまいる場所。
+	//    プラグインでは exe はホスト（DAW）なので、この関数が入っている DLL / .so の横とその上も見る。
+	//    ホストがいまいる場所をプラグインの場所にしてくれるとは限らない（issue #67）
 	{
-		const std::string dir = smu2000::exe_dir();
-		for (const std::string &q : { dir.empty() ? std::string() : dir + "art/real/panel.txt",
-		                              dir.empty() ? std::string() : dir + "../art/real/panel.txt",
-		                              std::string("art/real/panel.txt") })
-			if (!q.empty() && exists(q))
-				return q;
+		std::string mod = smu2000::module_dir(reinterpret_cast<const void *>(&layout::find_default));
+		if (!mod.empty())
+			mod += '/';
+		for (const std::string &dir : { smu2000::exe_dir(), mod })
+			for (const char *rel : { "art/real/panel.txt", "../art/real/panel.txt",
+			                         "../../art/real/panel.txt", "../../../art/real/panel.txt" })
+				if (!dir.empty() && exists(dir + rel))
+					return dir + rel;
+		if (exists("art/real/panel.txt"))
+			return "art/real/panel.txt";
 	}
 	// 5. プラグインの束の中（S-MU2000.vst3/Contents/Resources/panel/）。
 	//    ホストの exe ではなく、この関数が入っている DLL / .so の場所から探す

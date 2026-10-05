@@ -5,12 +5,12 @@
 // the Windows and macOS twins are ui/app_win.h and ui/app_mac.h.
 //
 // The class lives in files of its own rather than beside the window system
-// code, so SDL3's headers stay out of the file that pulls in the GDI shim.
+// code, so SDL3's headers stay out of the shared app header.
 // The layout is the three files every platform has: window system (window_sdl,
 // sdl_popup, pc_window_linux), app class (this), main (gui_linux.cpp).
 //
 // The panel language comes from ui::lang (--lang, editor.ini, locale:
-// Japanese iff the locale says ja, English otherwise). The GDI strings
+// Japanese iff the locale says ja, English otherwise). The UI strings
 // (ui/texts.h) and the ImGui help (ui/xg_ui.cpp) follow the same choice.
 
 #ifndef S_MU2000_UI_APP_LINUX_H
@@ -48,12 +48,15 @@ public:
 	// ---- the SDL window the pump in gui_linux.cpp maintains
 
 	SDL_Window   *win = nullptr;      // for dialogs, message boxes and popups
-	SDL_Renderer *ren = nullptr;
-	SDL_Texture  *tex = nullptr;      // the streaming texture the pump uploads
-	// The surface the panel paints into (a GDI DC over Cairo, gdi_linux.cpp)
-	HDC           panel_dc = nullptr;
-	void         *panel_bits = nullptr;
 	int           ww = 0, wh = 0;
+	// No renderer member: the window draws through SDL_gpu, and the state
+	// that needs (device, swapchain) lives with the window pump in
+	// window_sdl.cpp. This class only ever handed `ren` to the popup menu,
+	// which now presents through imshell::sdl_present().
+	// Live ImGui state for the main window, set by run_window.
+	// run_list's menu draws through the same frame.
+	ImGuiContext *imgui_ctx = nullptr;
+	im::fonts     imgui_fonts{};
 
 	// ---- ui::app hooks: dialogs, confirmations and error display are
 	// SDL's business (ui/sdl_popup), everything they decide is shared
@@ -195,13 +198,6 @@ public:
 		}
 	}
 
-	// One frame: the shared tick/status/paint sequence (like the Mac's one
-	// draw call), into the surface gui_linux.cpp's pump keeps in panel_dc
-	void frame()
-	{
-		paint_main(panel_dc, ww);
-	}
-
 	// The pump's quit flag; the dialogs must be able to abandon their wait
 	std::atomic<bool> quit{ false };
 
@@ -224,9 +220,10 @@ private:
 		}
 	}
 
-	// Modal popup over the live panel: gui_linux.cpp's implementation points
-	// sdl_popup at this window's framebuffer so the menu repaints the panel
-	// behind it. sub_chosen returns the submenu marker the user hovered
+	// Modal popup over the live panel: the implementation is in window_sdl.cpp,
+	// which hands sdl_popup a callback that paints the live frame again so the
+	// menu has the panel behind it. sub_chosen returns the submenu marker the
+	// user hovered
 	int run_list(const std::vector<sdl_popup::item> &items, int x, int y,
 	             int &sub_chosen);
 };

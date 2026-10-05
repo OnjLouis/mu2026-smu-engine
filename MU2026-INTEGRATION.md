@@ -26,3 +26,30 @@ The injected buses are an audio integration mechanism, not a claim that
 the plugin emulates a physical PLG board's command protocol or timing.
 Do not merge the modified VST DLL over an upstream S-MU2000 installation:
 the child ABI has sixteen inputs and is paired with the Mu2026 wrapper.
+
+## Upstream synchronization
+
+The 2026-10-05 integration includes upstream through
+`67c550e5bc58110dd527a745083e4e8aa25af919` (PR 121), including the sampler
+waveform generators introduced in PR 107 and subsequent loop, envelope,
+SysEx-import/export and waveform-editing corrections. These are MU sampler
+features, not a replacement for the hybrid's approximate PLG-AN engine.
+
+The fork deliberately retains these compatibility differences:
+
+- Sixteen external input channels and all four insertion buses.
+- Float input headroom and synchronized resampling at non-native rates.
+- The wrapper's firmware voice path and existing worker/gain selection.
+- Native variation sends, including per-drum-key scaling.
+- Relative ROM pointers resolved beside their own `roms.txt`, not the host's
+  working directory; incomplete ROM directories cannot shadow complete sets.
+
+Upstream is integrated by a normal merge, preserving its history and notices.
+Future merges should be evaluated in an isolated candidate against the current
+engine, rather than replacing the hybrid child DLL with an upstream download.
+The focused checks are `rom_search_probe`, `resampler_probe`, VSTi state/editor
+probes, and `--hybrid-fx` / `--hybrid-fx-48`. Full-mix comparisons should cover
+drums and delay, insertion-routed VL, SG, 2006LE fallback, DX/AN, and the heavy
+multi-worker case, at both 44.1 and 48 kHz. A compile is not an audio regression
+test. New upstream graphical controls do not establish screen-reader access;
+the hybrid's native accessible editor remains separate.

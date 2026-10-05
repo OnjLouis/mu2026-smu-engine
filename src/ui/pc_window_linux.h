@@ -1,7 +1,7 @@
 // license:BSD-3-Clause
 //
 // Linux side of the window that hosts an ImGui view (imgui_view) for gui.
-// One SDL3 window + SDL_Renderer per view, driven by the Dear ImGui SDL3
+// One SDL3 window + SDL_gpu swapchain per view, driven by the Dear ImGui SDL3
 // backends (vendored in third_party/imgui/backends).
 //
 // ui::pc_window.cpp is the Windows side (Win32 + Direct3D 11) and
@@ -21,6 +21,7 @@
 #pragma once
 
 #include "xg_ui.h"
+#include "ui/imgui_shell_sdl.h"   // imshell::sdl_state
 
 #include <SDL3/SDL.h>
 
@@ -66,7 +67,10 @@ private:
 
 	std::unique_ptr<imgui_view> m_view;
 	SDL_Window   *m_win = nullptr;
-	SDL_Renderer *m_ren = nullptr;
+	// The window's share of the ImGui/SDL_gpu bring-up, same shape the main
+	// window's is (ui/imgui_shell_sdl.h). Each editor window has its own
+	// ImGui context, and its own swapchain on the one shared device.
+	imshell::sdl_state m_im{};
 	ImGuiContext *m_imgui = nullptr;
 	Uint32        m_id = 0;
 	bool          m_was_visible = false;   // was visible in the previous frame (to catch hiding)

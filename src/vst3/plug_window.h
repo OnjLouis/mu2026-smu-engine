@@ -66,6 +66,7 @@ enum pc_kind {
 	PC_FX,            // インサーションの設定
 	PC_SHAPES,        // パートの音色
 	PC_MASTER,        // マスター
+	PC_SAMPLING,      // サンプリング
 };
 
 
@@ -74,13 +75,15 @@ enum pc_kind {
 // to different windows. Defaults to the overview, as both did before.
 inline ui::pc_window *pc_window_for_kind(int kind, ui::pc_window &list,
                                          ui::pc_window &editor, ui::pc_window &fx,
-                                         ui::pc_window &shapes, ui::pc_window &master)
+                                         ui::pc_window &shapes, ui::pc_window &master,
+                                         ui::pc_window &sampling)
 {
 	switch (kind) {
 	case PC_EDITOR: return &editor;
 	case PC_FX:     return &fx;
 	case PC_SHAPES: return &shapes;
 	case PC_MASTER: return &master;
+	case PC_SAMPLING: return &sampling;
 	default:        return &list;
 	}
 }

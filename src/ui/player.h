@@ -40,6 +40,11 @@ public:
 	// DIN の口だけのとき、3 口目以降（口 3・4）を A・B に重ねて鳴らすか（偽なら鳴らさない）。流している途中でも変えられる
 	void set_fold_extra_ports(bool on) { m_fold.store(on, std::memory_order_relaxed); }
 	bool fold_extra_ports() const { return m_fold.load(std::memory_order_relaxed); }
+	// 重い MIDI を軽くするか（詰まったピッチベンドの間引きと、Roland の液晶のデータを送らない。
+	// 既定は切り。bend_thinner.h、issue #82）。
+	// 実機と同じ遅れを避けたいとき用で、実機の鳴り方からは外れる
+	void set_thin_bends(bool on) { m_thin.store(on, std::memory_order_relaxed); }
+	bool thin_bends() const { return m_thin.load(std::memory_order_relaxed); }
 	// 開いたファイルが使っている口の数（1〜）
 	int ports_used() const { return m_ports_used; }
 	std::string name() const { return m_name; }
@@ -55,6 +60,7 @@ private:
 	std::atomic<bool> m_playing{false};
 	std::atomic<double> m_pos{0};
 	std::atomic<bool> m_fold{true};
+	std::atomic<bool> m_thin{false};
 	std::atomic<bool> m_usb{true};
 	int         m_ports_used = 1;
 	double      m_len = 0;

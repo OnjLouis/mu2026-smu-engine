@@ -5,15 +5,23 @@
 // input semantics all live in view.cpp; this is only the window.
 //
 
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+
 #include "plug_window.h"
 #include "view.h"
 
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include "ui/imgui_shell.h"
+
+#include "imgui.h"
+
 #include "ui/fx_editor.h"
 #include "ui/keymap.h"
 #include "ui/master_editor.h"
+#include "ui/sampling_editor.h"
 #include "ui/menu.h"
 #include "ui/overview.h"
 #include "ui/part_shapes.h"
@@ -76,15 +84,20 @@ using smu2000::vst3::PC_EDITOR;
 // mac_window, defined below: the card menu's choices open its PC windows
 namespace smu2000 { namespace vst3 { class mac_window; } }
 
-// The panel's view. Flipped, so the CGContext AppKit hands to drawRect already
-// has its origin top-left with y running down -- the space compat/gdi.h assumes
-// and the space the panel's hit testing is written in.
+// The panel's view. Layer-hosted Metal + Dear ImGui, the same pair as the
+// GUI front end's window (ui/window_mac.mm). Panel input stays shared, in
+// the same top-left, y-down space the hit testing is written in.
 @interface SMUPlugView : NSView
 {
 @public
 	plug_view *_owner;
 @private
 	NSTimer *_timer;
+	CAMetalLayer *_mtl_layer;
+	id<MTLDevice> _mtl_dev;
+	id<MTLCommandQueue> _mtl_queue;
+	ImGuiContext *_imgui;
+	ui::im::fonts _fonts;
 	int _clicks;
 	int _moves;
 	int _ticks;
@@ -93,6 +106,10 @@ namespace smu2000 { namespace vst3 { class mac_window; } }
 - (void)tick:(NSTimer *)timer;
 - (void)ensureTimer;
 - (plug_key)plugKeyForEvent:(NSEvent *)event;
+- (BOOL)startImgui;
+- (void)stopImgui;
+- (void)renderImgui;
+- (void)syncMetalSize;
 @end
 
 @implementation SMUPlugView
@@ -136,11 +153,57 @@ namespace smu2000 { namespace vst3 { class mac_window; } }
 	// timer is remade here instead of staying missing
 	if (!_timer && [self window])
 		[self ensureTimer];
-	CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-	if (!ctx)
+	(void)dirty;   // the Metal layer presents itself; nothing to draw here
+}
+
+- (void)setFrameSize:(NSSize)newSize
+{
+	[super setFrameSize:newSize];
+	[self syncMetalSize];
+}
+
+- (BOOL)startImgui
+{
+	_mtl_layer = ui::imshell::metal_attach(self, _mtl_dev, _mtl_queue);
+	if (!_mtl_layer)
+		return NO;
+	[self syncMetalSize];
+
+	_imgui = ui::imshell::new_context();
+	_fonts = ui::imshell::panel_fonts();
+	ImGui_ImplMetal_Init(_mtl_dev);
+	_owner->fonts_ready();
+	return YES;
+}
+
+- (void)stopImgui
+{
+	ui::imshell::metal_stop(_imgui);
+	_fonts = ui::im::fonts{};
+	_mtl_layer = nil;
+	_mtl_queue = nil;
+	_mtl_dev = nil;
+}
+
+- (void)syncMetalSize
+{
+	ui::imshell::metal_sync(_mtl_layer, self);
+}
+
+- (void)renderImgui
+{
+	if (!_imgui || !_owner || !_mtl_layer)
 		return;
 	const NSRect b = [self bounds];
-	_owner->repaint((void *)ctx, (int)b.size.width, (int)b.size.height);
+	const CGFloat scale = [self.window backingScaleFactor];
+	plug_view *owner = _owner;
+	ui::im::fonts fonts = _fonts;
+	ui::imshell::metal_paint(_imgui, _mtl_layer, _mtl_queue,
+	                         float(b.size.width), float(b.size.height), float(scale),
+	                         ^(ImDrawList *dl) {
+	                             owner->repaint(dl, fonts,
+	                                            (int)b.size.width, (int)b.size.height);
+	                         });
 }
 
 // Repaint at the same 30 frames a second the Win32 window uses, so the two
@@ -153,7 +216,7 @@ namespace smu2000 { namespace vst3 { class mac_window; } }
 		if (_owner && _ticks == 1)
 			_owner->log_line("panel timer: first tick");
 	}
-	[self setNeedsDisplay:YES];
+	[self renderImgui];
 }
 
 // Start the repaint timer unless one already runs. Safe to call twice
@@ -384,7 +447,7 @@ public:
 	void open_pc(ui::pc_window &w);
 	void open_pc_window(int kind) override
 	{
-		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master));
+		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master, m_sampling));
 	}
 
 private:
@@ -397,6 +460,7 @@ private:
 	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
 	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
 	ui::pc_window m_master{ std::make_unique<ui::master_editor>() };
+	ui::pc_window m_sampling{ std::make_unique<ui::sampling_editor>() };
 };
 
 // Objective-C lives at global scope (see the note on SMUPlugView above);
@@ -550,6 +614,13 @@ bool mac_window::attach(void *parent, int w, int h)
 	// things around us
 	[host addSubview:m_view];
 	[m_view setFrame:NSMakeRect(0, 0, w, h)];
+	// No renderer, no custom view: the host falls back to generic
+	// parameters, the way the headless Linux build answers
+	if (![m_view startImgui]) {
+		[m_view removeFromSuperview];
+		m_view = nil;
+		return false;
+	}
 	// First responder is asked for from viewDidMoveToWindow: the window is not
 	// known here yet (this runs before the host has shown the view), and asking
 	// then answers nil. Waiting until the view is somewhere can tell a host's own
@@ -571,8 +642,10 @@ void mac_window::detach()
 	m_fx.hide();
 	m_shapes.hide();
 	m_master.hide();
+	m_sampling.hide();
 	if (m_view) {
 		[[NSNotificationCenter defaultCenter] removeObserver:m_view];
+		[m_view stopImgui];
 		[m_view removeFromSuperview];
 		m_view->_owner = nullptr;
 		m_view = nil;
@@ -595,7 +668,7 @@ void mac_window::open_pc(ui::pc_window &w)
 // Driven at the panel's repaint rate. Hidden windows cost nothing
 void mac_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br)
 {
-	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m, ram, br,
+	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m_sampling, m, ram, br,
 	                 [this](ui::pc_window &w) { open_pc(w); });
 }
 

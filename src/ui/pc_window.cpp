@@ -4,6 +4,7 @@
 #include "text.h"
 #include "ui/texts.h"
 #include "ui/lang.h"
+#include "ui/font_file.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_dx11.h"
@@ -23,18 +24,8 @@ namespace ui {
 namespace {
 
 const wchar_t CLASS_NAME[] = L"SMU2000PcEditor";
-
-// 日本語の出る字。Windows に入っているものを順に探す（配らない）
-const char *const FONTS[] = {
-	"C:\\Windows\\Fonts\\YuGothM.ttc",
-	"C:\\Windows\\Fonts\\meiryo.ttc",
-	"C:\\Windows\\Fonts\\msgothic.ttc",
-};
-
-bool file_exists(const char *path)
-{
-	return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-}
+// ファイルの窓を描画の外で開く（pc_window::frame が頼む）
+constexpr UINT WM_APP_FILE_DIALOG = WM_APP + 0x41;
 
 // .syx の書き出し・読み込みの窓（xgui::ask_save_file・ask_open_file の頼み）。
 // 描き終えたあとに開く。窓が回っている間にタイマーが別のコマを描いても、前のコマは終わっている
@@ -43,16 +34,22 @@ void file_dialog(HWND owner, xgui::file_ask ask, const std::vector<u8> &bytes)
 	wchar_t path[MAX_PATH * 4] = {};
 	if (ask == xgui::file_ask::save)
 		wcscpy_s(path, L"S-MU2000.syx");
+	const bool wav = ask == xgui::file_ask::open && xgui::file_ask_is_wav();
+	const bool card = ask == xgui::file_ask::open && xgui::file_ask_is_card();
 	// Bound here: the dialog reads the filter while it runs.
-	const std::wstring filter = dlg_filter(UI_TEXT(dlg_sysex_desc, "SysEx"), "*.syx",
-	                                       UI_TEXT(dlg_all_files, "All files"), "*.*");
+	const std::wstring filter = card ? dlg_filter(UI_TEXT(dlg_card_or_m2a_desc, "SmartMedia image or M2A file"), "*.img;*.sm;*.m2a",
+	                                              UI_TEXT(dlg_all_files, "All files"), "*.*")
+	                          : wav ? dlg_filter(UI_TEXT(dlg_wav_desc, "WAV audio or SysEx"), "*.wav;*.syx",
+	                                             UI_TEXT(dlg_all_files, "All files"), "*.*")
+	                                 : dlg_filter(UI_TEXT(dlg_sysex_desc, "SysEx"), "*.syx",
+	                                              UI_TEXT(dlg_all_files, "All files"), "*.*");
 	OPENFILENAMEW o{};
 	o.lStructSize = sizeof(o);
 	o.hwndOwner   = owner;
 	o.lpstrFilter = filter.c_str();
 	o.lpstrFile   = path;
 	o.nMaxFile    = DWORD(std::size(path));
-	o.lpstrDefExt = L"syx";
+	o.lpstrDefExt = wav ? L"wav" : L"syx";
 	if (ask == xgui::file_ask::save) {
 		o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
 		if (!GetSaveFileNameW(&o))
@@ -69,11 +66,18 @@ void file_dialog(HWND owner, xgui::file_ask ask, const std::vector<u8> &bytes)
 	o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
 	if (!GetOpenFileNameW(&o))
 		return;
+	// カードの画像は大きい（最大 132MB）ので読まずに、場所だけを返す（読むのはサンプリングの窓）
+	if (card) {
+		xgui::give_opened_card(to_utf8(path));
+		return;
+	}
 	std::vector<u8> in;
 	if (std::FILE *f = _wfopen(path, L"rb")) {
 		u8 buf[65536];
 		size_t n;
-		while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0 && in.size() < (16u << 20))
+		// WAV はサンプリング RAM（約 48 秒）の 2ch・浮動小数でも収まる大きさまで
+		const size_t cap = wav ? (64u << 20) : (16u << 20);
+		while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0 && in.size() < cap)
 			in.insert(in.end(), buf, buf + n);
 		std::fclose(f);
 		xgui::give_opened_file(std::move(in));
@@ -158,10 +162,10 @@ bool pc_window::create(HINSTANCE inst, std::string &err)
 	style.FontScaleDpi = scale;
 	style.FrameRounding = 3;
 
-	for (const char *path : FONTS) {
-		if (file_exists(path) && io.Fonts->AddFontFromFileTTF(path, 16.0f))
-			break;
-	}
+	// The editor windows keep upstream's exact font: first existing file, face 0
+	// (ui/font_file.h). The panel's unified walk must not serve here -- it
+	// picks by weight and renders a lighter face than upstream's editors.
+	add_cjk_editor_font(io.Fonts);
 
 	ImGui_ImplWin32_Init(m_hwnd);
 	ImGui_ImplDX11_Init(m_dev, m_ctx);
@@ -262,10 +266,14 @@ void pc_window::frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// 待たない。gui のタイマー（30 コマ／秒）が間隔を決める
 	m_swap->Present(0, 0);
 
+	// ファイルの窓は、ここでは開かずに自分の窓へ頼む（描画の外で開く。pc_window.h の m_file_ask）
 	std::vector<u8> bytes;
 	const xgui::file_ask ask = xgui::take_file_ask(bytes);
-	if (ask != xgui::file_ask::none)
-		file_dialog(m_hwnd, ask, bytes);
+	if (ask != xgui::file_ask::none && !m_file_ask) {
+		m_file_ask = int(ask);
+		m_file_bytes = std::move(bytes);
+		PostMessageW(m_hwnd, WM_APP_FILE_DIALOG, 0, 0);
+	}
 }
 
 LRESULT CALLBACK pc_window::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -278,6 +286,9 @@ LRESULT CALLBACK pc_window::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		// （trickle）。マウスの軌跡が溜まって、絵の点も送る値も遅れてついてくる
 		if (msg == WM_CHAR && !ImGui::GetIO().WantTextInput)
 			return 0;
+		// 日本語配列の ￥（スキャンコード 0x7D）は ImGui の受け口が拾わない。Oem102（JIS には無いキー）として渡す
+		if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && ((lp >> 16) & 0xff) == 0x7d)
+			ImGui::GetIO().AddKeyEvent(ImGuiKey_Oem102, msg == WM_KEYDOWN);
 		if (ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp))
 			return 1;
 	}
@@ -293,6 +304,14 @@ LRESULT CALLBACK pc_window::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 		if ((wp & 0xfff0) == SC_KEYMENU)     // Alt で窓の品書きに入らない
 			return 0;
 		break;
+	case WM_APP_FILE_DIALOG:
+		if (self && self->m_file_ask) {
+			const xgui::file_ask ask = xgui::file_ask(self->m_file_ask);
+			std::vector<u8> bytes = std::move(self->m_file_bytes);
+			file_dialog(h, ask, bytes);
+			self->m_file_ask = 0;
+		}
+		return 0;
 	case WM_CLOSE:
 		ShowWindow(h, SW_HIDE);              // 消さずに隠す
 		return 0;

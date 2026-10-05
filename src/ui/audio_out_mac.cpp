@@ -117,15 +117,19 @@ std::string lowered(const std::string &s)
 // The output whose name contains `want`, or the system default when nothing was
 // asked for. Matching a part of a name is what the Windows side does, and it is
 // what --audio documents
-AudioDeviceID find_device(const std::string &want)
+AudioDeviceID find_device(const std::string &want, bool exact)
 {
 	if (want.empty())
 		return default_output_device();
 
 	const std::string needle = lowered(want);
-	for (AudioDeviceID d : output_devices())
-		if (lowered(name_of(d)).find(needle) != std::string::npos)
+	const auto devices = output_devices();
+	for (int pass = 0; pass < (exact ? 1 : 2); pass++)
+	for (AudioDeviceID d : devices) {
+		const std::string name = lowered(name_of(d));
+		if (pass == 0 ? name == needle : name.find(needle) != std::string::npos)
 			return d;
+	}
 	return kAudioObjectUnknown;
 }
 
@@ -263,6 +267,7 @@ struct audio_out::impl
 	std::atomic<u32>  buffer_frames{0};
 	std::atomic<u64>  produced{0}, starved{0};
 	std::atomic<u64>  busy_ticks{0}, worst_ticks{0};
+	cpu_meter         meter;        // recent load for the display (issue #80)
 	std::atomic<bool> realtime{false};
 	double            tps = 1.0;
 
@@ -317,6 +322,7 @@ struct audio_out::impl
 
 		const u64 took = mach_absolute_time() - t0;
 		busy_ticks.fetch_add(took, std::memory_order_relaxed);
+		meter.add(double(took) / tps, double(frames) / AUDIO_RATE);
 		u64 worst = worst_ticks.load(std::memory_order_relaxed);
 		while (took > worst &&
 		       !worst_ticks.compare_exchange_weak(worst, took, std::memory_order_relaxed)) {
@@ -349,7 +355,7 @@ audio_out::~audio_out()
 {
 	stop();
 }bool audio_out::start(int latency_ms, fill_fn fill, std::string &err, bool exclusive,
-                      const std::string &device, bool raw)
+                      const std::string &device, bool raw, bool exact)
 {
 	(void)raw;                    // nothing to bypass on this side (audio_out.h)
 	if (m_impl && m_impl->running.load())
@@ -358,7 +364,7 @@ audio_out::~audio_out()
 
 	// The port to open. Looked up first, so a name that matches nothing is
 	// reported before anything is opened
-	const AudioDeviceID dev = find_device(device);
+	const AudioDeviceID dev = find_device(device, exact);
 	if (dev == kAudioObjectUnknown) {
 		err = device.empty() ? "音声の出口が見つからない"
 		                     : "その名前の音声の出口が見つからない: " + device;
@@ -566,6 +572,11 @@ double audio_out::cpu_percent() const
 	const double audio = double(done) / AUDIO_RATE;
 	const double busy  = double(m_impl->busy_ticks.load()) / m_impl->tps;
 	return 100.0 * busy / audio;
+}
+
+double audio_out::cpu_recent() const
+{
+	return m_impl ? m_impl->meter.value() : 0.0;
 }
 
 double audio_out::worst_ms() const

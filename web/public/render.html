@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <link rel="icon" href="data:," />
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>S-MU2000 Offline Render</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="nav"><a href="index.html">← S-MU2000 Web</a></div>
+        <h1>Offline Render</h1>
+        <p class="note">
+            Renders a MIDI file through the MU2000's own firmware (dumped from your unit) to WAV,
+            entirely in this tab. You need ROMs extracted from your own
+            MU2000 (see
+            <a
+                href="https://github.com/tarboh/S-MU2000/blob/main/doc/manual.en.md#2-preparing-the-roms"
+                >Preparing the ROMs</a
+            >); they are stored locally in your browser and never uploaded
+            anywhere.
+        </p>
+
+        <div class="card">
+            <label class="btn" for="roms">Choose ROM folder…</label>
+            <input type="file" id="roms" webkitdirectory hidden />
+            <span id="romFolder" class="note">your roms/ directory</span>
+            <ul id="romList"></ul>
+            <div class="row">
+                <button class="btn" id="forgetRoms">Forget stored ROMs</button>
+            </div>
+            <p class="note">Picked ROMs are stored locally in this browser.</p>
+        </div>
+
+        <div class="card">
+            <label class="btn" for="midi">Choose MIDI file…</label>
+            <input type="file" id="midi" accept=".mid,.midi" hidden />
+            <span id="midiName" class="note">no file</span>
+        </div>
+
+        <div class="card">
+            <div class="row">
+                <button class="btn primary" id="render" disabled>Render</button>
+            </div>
+            <progress id="progress" max="1" value="0"></progress>
+            <span id="status"></span>
+        </div>
+
+        <div class="card" id="result" hidden>
+            <audio id="player" controls></audio>
+            <br />
+            <a id="download">Render something first</a>
+        </div>
+
+        <script type="module">
+            import { init } from "./render.js";
+            init();
+        </script>
+    </body>
+</html>

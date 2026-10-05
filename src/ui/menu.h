@@ -90,12 +90,14 @@ enum : int {
 	ID_CARD_NEW16 = 5000, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
 	ID_CARD_OPEN = 5010, ID_CARD_EJECT = 5011,
 	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
+	ID_THIN_BENDS = 5104,    // the player lightens heavy MIDI (issue #82)
 	ID_FACTORY = 5200,
 	ID_NATIVE_FX = 5215,     // lightweight mode (C++ effects)
 	ID_NATIVE_ENGINE = 5216, // firmware を走らせない口（聞き比べ用）
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
 	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
+	ID_AUDIO_DEFAULT = 5500, ID_AUDIO_BASE = 5501,
 };
 
 // Checked at compile time, because the failure is silent: a menu id that lands
@@ -104,7 +106,7 @@ enum : int {
 static_assert([] {
 	const int bases[] = { ID_IN_BASE, ID_IN_BASE + ID_IN_STRIDE, ID_IN_BASE + 2 * ID_IN_STRIDE,
 	                      ID_IN_BASE + 3 * ID_IN_STRIDE,
-	                      ID_OUT_BASE, ID_OUTB_BASE, ID_OUTMU_BASE, ID_AIN_BASE };
+	                      ID_OUT_BASE, ID_OUTB_BASE, ID_OUTMU_BASE, ID_AIN_BASE, ID_AUDIO_BASE };
 	const int singles[] = { ID_IN_NONE, ID_IN_NONE + ID_IN_STRIDE, ID_IN_NONE + 2 * ID_IN_STRIDE,
 	                        ID_IN_NONE + 3 * ID_IN_STRIDE,
 	                        ID_OUT_NONE, ID_OUTB_NONE, ID_OUTMU_NONE,
@@ -112,8 +114,8 @@ static_assert([] {
 	                        ID_CARD_NEW128, ID_CARD_OPEN, ID_CARD_EJECT,
 	                        ID_PLAY_FILE, ID_STOP_FILE, ID_FACTORY, ID_NATIVE_FX,
 	                        ID_NATIVE_ENGINE,
-	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_PC_EDITOR, ID_OVERVIEW,
-	                        ID_OUTPUT_DIGITAL, ID_OUTPUT_ANALOG };
+	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_THIN_BENDS, ID_PC_EDITOR, ID_OVERVIEW,
+	                        ID_OUTPUT_DIGITAL, ID_OUTPUT_ANALOG, ID_AUDIO_DEFAULT };
 	for (int base : bases) {
 		for (int id : singles)
 			if (id >= base && id < base + 256)
@@ -145,6 +147,9 @@ struct menu_state {
 	std::vector<std::string> midi_ins;
 	std::vector<std::string> midi_outs;
 	std::vector<std::string> audio_ins;
+	std::vector<std::string> audio_outs;
+	std::string audio_name;  // empty selects the system default
+	bool audio_ready = false; // startup has released the output to the UI
 	int in_dev[4] = { -1, -1, -1, -1 };
 	int out_dev = -1, out_dev_b = -1, out_dev_mu = -1;
 	std::string ain_name;
@@ -152,6 +157,7 @@ struct menu_state {
 	bool playing = false;
 	std::string play_name;
 	bool fold34 = true;      // ports 3+4 of a MIDI file fold onto A and B
+	bool thin_bends = false; // the player lightens heavy MIDI (bends, Roland display data)
 	bool ready = false;      // the firmware is up (factory reset is offered)
 	bool native_fx = false;  // lightweight C++ effects are on
 	bool native_engine = false;  // skip-firmware ports, toggled live for listening tests
@@ -239,6 +245,24 @@ inline menu_group menu_ain_group(const std::vector<std::string> &names, const st
 	return g;
 }
 
+// Enumerated afresh when opening a menu. The caller keeps this exact snapshot
+// for dispatch: hotplugging must not turn an old index into another device.
+inline menu_group menu_audio_output(const menu_state &s)
+{
+	using namespace menu_detail;
+	menu_group g;
+	g.title = UI_TEXT(menu_audio_title, "Audio output device");
+	g.items.push_back(text(UI_TEXT(menu_audio_default, "System default"),
+	                       ID_AUDIO_DEFAULT, s.audio_name.empty(), s.audio_ready));
+	g.items.push_back(separator());
+	if (s.audio_outs.empty())
+		g.items.push_back(text(UI_TEXT(menu_no_audio, "(No playback devices)"), 0, false, false));
+	for (size_t i = 0; i < s.audio_outs.size() && i < 256; i++)
+		g.items.push_back(text(s.audio_outs[i].c_str(), ID_AUDIO_BASE + int(i),
+		                       s.audio_outs[i] == s.audio_name, s.audio_ready));
+	return g;
+}
+
 // The right-click menu: the four MIDI IN ports, MIDI OUT, the two THRUs,
 // A/D INPUT, the PC editor windows, the lightweight-mode toggle, and the
 // factory reset. Same items in the same order on both platforms
@@ -257,6 +281,7 @@ inline std::vector<menu_group> menu_ports(const menu_state &s)
 	groups.push_back(menu_port_group(UI_TEXT(menu_thru_b, "MIDI THRU B (sends out what B receives)"), s.midi_outs,
 	                                 s.out_dev_b, ID_OUTB_NONE, ID_OUTB_BASE));
 	groups.push_back(menu_ain_group(s.audio_ins, s.ain_name));
+	groups.push_back(menu_audio_output(s));
 
 	menu_group ed;
 	ed.items.push_back(text(UI_TEXT(menu_open_list, "Open the list"), ID_OVERVIEW, false, true, "F3"));
@@ -312,23 +337,26 @@ inline std::vector<menu_group> menu_card(const menu_state &s)
 	g.items.push_back(separator());
 	g.items.push_back(text(UI_TEXT(menu_fold34, "Fold ports 3+4 onto A and B (DIN ports only)"), ID_PORTS34_FOLD, s.fold34, true));
 	g.items.push_back(text(UI_TEXT(menu_drop34, "Drop ports 3+4 (DIN ports only)"), ID_PORTS34_DROP, !s.fold34, true));
+	// Dense pitch bends (more than the firmware works through in real time)
+	g.items.push_back(separator());
+	g.items.push_back(text(UI_TEXT(menu_thin_bends, "Lighten heavy MIDI: thin pitch bends, drop Roland display data (unlike the real unit)"), ID_THIN_BENDS, s.thin_bends, true));
 	groups.push_back(g);
 	return groups;
 }
 
 // The PHONES jack: digital (as S/PDIF, DPCM DC included) or analogue
 // (DC removed, src/analog_out.h)
-inline std::vector<menu_group> menu_phones(bool analog)
+inline std::vector<menu_group> menu_phones(const menu_state &s)
 {
 	using namespace menu_detail;
 	menu_group g;
 	g.items.push_back(text(UI_TEXT(menu_out_title, "Sound output"), 0, false, false));
 	g.items.push_back(separator());
 	g.items.push_back(text(UI_TEXT(menu_out_digital, "Digital (S/PDIF; keeps DPCM DC)"),
-	                       ID_OUTPUT_DIGITAL, !analog, true));
+	                       ID_OUTPUT_DIGITAL, !s.analog, true));
 	g.items.push_back(text(UI_TEXT(menu_out_analog, "Analog (LINE OUT/PHONES; cuts DC)"),
-	                       ID_OUTPUT_ANALOG, analog, true));
-	return { g };
+	                       ID_OUTPUT_ANALOG, s.analog, true));
+	return { menu_audio_output(s), g };
 }
 
 // The A/D INPUT jack on its own: the recording-device picker under its heading

@@ -4,13 +4,12 @@
 // the handling of mouse and key input. The window that holds it is per
 // platform (view_win.cpp, view_mac.mm), reached through plug_window.h.
 //
-// This file is plain C++ and includes compat/gdi.h, which is what paints the
-// panel on both platforms.
+// This file is plain C++ and paints through Dear ImGui; each platform window
+// owns its renderer and context and hands repaint() the draw list.
 
 #include "view.h"
 #include "plug_window.h"
 
-#include "compat/gdi.h"
 #include "compat/platform.h"
 #include "engine.h"
 #include "smartmedia.h"
@@ -18,10 +17,6 @@
 #include "ui/layout.h"
 #include "ui/panel.h"
 #include "ui/toolbar.h"
-
-#if defined(__APPLE__)
-#include <CoreGraphics/CoreGraphics.h>
-#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -97,7 +92,7 @@ plug_key plug_key_of_button(int button)
 	return PLUG_KEY_NONE;
 }
 
-// The panel lives here so that view.h can stay free of compat/gdi.h
+// The panel lives here so that view.h only needs the draw-list types
 struct plug_view::impl
 {
 	engine  &eng;
@@ -106,25 +101,18 @@ struct plug_view::impl
 	// DAW でも、ここからなら確実に開ける（ui/toolbar.h）
 	ui::toolbar bar;
 
-#if defined(_WIN32)
-	// Double buffered: the host repaints at 30 frames a second and drawing
-	// straight into the window would flicker
-	HDC     mem_dc = nullptr;
-	HBITMAP mem_bmp = nullptr;
-	int     mem_w = 0, mem_h = 0;
-#endif
-
 	explicit impl(engine &e) : eng(e)
 	{
 		// The bar ids are the pc_kind the view dispatches (open_pc_window)
 		static_assert(int(ui::BAR_LIST) == PC_LIST && int(ui::BAR_EDITOR) == PC_EDITOR &&
 		              int(ui::BAR_FX) == PC_FX && int(ui::BAR_SHAPES) == PC_SHAPES &&
-		              int(ui::BAR_MASTER) == PC_MASTER, "bar ids are pc_kind");
+		              int(ui::BAR_MASTER) == PC_MASTER && int(ui::BAR_SAMPLING) == PC_SAMPLING,
+		              "bar ids are pc_kind");
 		bar.set_items(ui::window_bar_items());
 		panel.set_top_inset(ui::toolbar::HEIGHT);
 	}
 
-	void paint_panel(HDC dc)
+	void paint_panel(ImDrawList *dl, const ui::im::fonts &fonts)
 	{
 		ui::snapshot s;
 		eng.panel().read(s);
@@ -133,25 +121,18 @@ struct plug_view::impl
 		std::snprintf(status, sizeof(status), "%s", eng.message().c_str());
 
 		panel.set_volume(eng.panel().gain());
-		panel.paint(dc, s, eng.panel().buttons(), status);
+		panel.paint(dl, s, eng.panel().buttons(), status);
 		// 帯はパネルの**あと**に描く（パネルは全面を塗る）
-		bar.paint(dc, panel.width());
-	}
-
-	void forget_backing()
-	{
-#if defined(_WIN32)
-		if (mem_bmp) { DeleteObject(mem_bmp); mem_bmp = nullptr; }
-		if (mem_dc)  { DeleteDC(mem_dc); mem_dc = nullptr; }
-		mem_w = mem_h = 0;
-#endif
+		bar.paint(dl, panel.width(), fonts.label, fonts.label_px);
 	}
 };
 
 
-plug_view::plug_view(engine &eng)
-	: m_impl(new impl(eng)), m_engine(eng)
+plug_view::plug_view(engine &eng, FUnknown *owner)
+	: m_impl(new impl(eng)), m_engine(eng), m_owner(owner)
 {
+	if (m_owner)
+		m_owner->addRef();
 	// パネルの配置。%LOCALAPPDATA%\S-MU2000\panel.txt があれば読む。無ければ
 	// 束の中の写真調の絵（Resources/panel）、それも無ければ組み込みの配置
 	// （doc/panel-editing.md）
@@ -181,6 +162,13 @@ int plug_view::default_height() { return ui::LOGICAL_H + ui::toolbar::HEIGHT; }
 plug_view::~plug_view()
 {
 	removed();
+	// 窓と panel（engine の bridge を見ている）を先に片付けてから、本体を手放す。
+	// 本体はこれで最後の参照が外れて消えることがある
+	m_impl.reset();
+	if (Steinberg::FUnknown *owner = m_owner) {
+		m_owner = nullptr;
+		owner->release();
+	}
 }
 
 tresult PLUGIN_API plug_view::queryInterface(const TUID iid, void **obj)
@@ -210,6 +198,7 @@ tresult PLUGIN_API plug_view::isPlatformTypeSupported(FIDString type)
 
 tresult PLUGIN_API plug_view::attached(void *parent, FIDString type)
 {
+	engine::trace("view attached", this);
 	if (isPlatformTypeSupported(type) != kResultTrue || !parent)
 		return kResultFalse;
 	if (m_window)
@@ -222,11 +211,13 @@ tresult PLUGIN_API plug_view::attached(void *parent, FIDString type)
 		return kResultFalse;
 	}
 	m_impl->panel.resize(m_w, m_h);
+	engine::trace("view attached done", this);
 	return kResultOk;
 }
 
 tresult PLUGIN_API plug_view::removed()
 {
+	engine::trace("view removed", this);
 	// The card file is the project's data, so the last of it is written back
 	// before the window goes: a host that closes the editor and never saves
 	// still keeps what the machine wrote
@@ -237,7 +228,7 @@ tresult PLUGIN_API plug_view::removed()
 		m_window = nullptr;
 	}
 	m_engine.notify_idle(true);
-	m_impl->forget_backing();
+	engine::trace("view removed done", this);
 	return kResultOk;
 }
 
@@ -292,9 +283,14 @@ tresult PLUGIN_API plug_view::checkSizeConstraint(ViewRect *rect)
 
 // ---- Called by the platform window
 
-void plug_view::repaint(void *native, int w, int h)
+void plug_view::fonts_ready()
 {
-	if (!native || w <= 0 || h <= 0)
+	m_impl->panel.fonts_ready();
+}
+
+void plug_view::repaint(ImDrawList *dl, const ui::im::fonts &fonts, int w, int h)
+{
+	if (!dl || w <= 0 || h <= 0)
 		return;
 
 	// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
@@ -307,30 +303,7 @@ void plug_view::repaint(void *native, int w, int h)
 	// 触っている最中の値の操作（ホストへの beginEdit / endEdit）を、しばらく触られていなければ終える
 	m_engine.notify_idle(false);
 
-#if defined(_WIN32)
-	HDC dst = static_cast<HDC>(native);
-	if (!m_impl->mem_dc || m_impl->mem_w != w || m_impl->mem_h != h) {
-		m_impl->forget_backing();
-		m_impl->mem_dc  = CreateCompatibleDC(dst);
-		m_impl->mem_bmp = CreateCompatibleBitmap(dst, w, h);
-		SelectObject(m_impl->mem_dc, m_impl->mem_bmp);
-		m_impl->mem_w = w;
-		m_impl->mem_h = h;
-	}
-	m_impl->paint_panel(m_impl->mem_dc);
-	BitBlt(dst, 0, 0, w, h, m_impl->mem_dc, 0, 0, SRCCOPY);
-#elif defined(__APPLE__)
-	// The subview is flipped, so the context is already top-left with y down
-	// and only has to be wrapped -- no flipping, same as the GUI window
-	CGContextRef ctx = static_cast<CGContextRef>(native);
-	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, w, h));
-	m_impl->paint_panel(dc);
-	DeleteDC(dc);
-#else
-	// Linux headless build (plug_window_linux): the stub window never paints.
-	// The editor view arrives in a later phase (doc/porting-linux-gui.md).
-	(void)native; (void)w; (void)h;
-#endif
+	m_impl->paint_panel(dl, fonts);
 
 	card_tick();
 }
@@ -432,11 +405,11 @@ void plug_view::card_error(const std::string &err)
 
 void plug_view::card_make(const std::string &path, int mb)
 {
-	// An empty card, in the physical layout a new one comes in: the machine
-	// still has to format it (UTIL -> CARD -> Format) before it stores anything
+	// A new card, already formatted the way the machine's UTIL -> CARD ->
+	// Format leaves it (smartmedia::format), so it can be saved to at once
 	std::string err;
 	smartmedia card;
-	if (!card.create(u32(mb)) || !card.save(path, err)) {
+	if (!card.create(u32(mb)) || !card.format() || !card.save(path, err)) {
 		card_error(err.empty() ? UI_TEXT(dlg_card_create_fail, "Cannot create the SmartMedia image") : err);
 		return;
 	}
@@ -444,12 +417,10 @@ void plug_view::card_make(const std::string &path, int mb)
 		card_error(err);
 		return;
 	}
-	// A fresh card only carries the physical layout, so it has to be formatted
-	// on the machine before it holds anything. gui.cpp says the same thing when
-	// one is made there
+	// Same note as the standalone (app.h new_card)
 	if (m_window)
-		m_window->alert(UI_TEXT(dlg_fresh_card, "Inserted a blank SmartMedia image.\n"
-		                                        "Before use, format it on the machine: UTIL → CARD → Format."));
+		m_window->alert(UI_TEXT(dlg_fresh_card, "Inserted a new SmartMedia image.\n"
+		                                        "It is already formatted (as UTIL → CARD → Format leaves it), so it can be saved to right away."));
 }
 
 void plug_view::card_insert_path(const std::string &path)
@@ -468,6 +439,14 @@ void plug_view::card_eject() { m_engine.card_eject(); }
 // (the host interface on save, and removed() when the window goes)
 void plug_view::card_tick()
 {
+	// サンプリングの窓の「カード」: 頼まれたカードを差し、差しているカードの場所を知らせる。
+	// ここはパネルを描いている途中なので、知らせの窓（alert）は出さずに記録だけ残す
+	ui::bridge &br = m_engine.panel();
+	std::string want, err;
+	if (br.take_card_request(want) && !m_engine.card_insert(want, err))
+		m_engine.log_line(("SmartMedia を差せない: " + err).c_str());
+	br.set_card_path(m_engine.card_path());
+
 	const uint64_t now = smu2000::perf_ticks() * 1000 / smu2000::perf_freq();
 	if (now - m_last_flush < 2000)
 		return;

@@ -44,10 +44,28 @@ request — plug-ins stay headless (generic UI) until a later phase; the shared
   at all, at 30 fps for a ~1400×360 window. Text goes through `cairo-ft` +
   fontconfig (DejaVu/Noto fallback for "Segoe UI", same caveat as macOS).
 * **PC editor windows: Dear ImGui views (shared) + SDL3 shell.**
-  `third_party/imgui` is 1.92.9b, which ships `imgui_impl_sdl3` /
-  `imgui_impl_sdlrenderer3`; vendor those two files unmodified, like the
-  win32/dx11/metal backends already there. One `SDL_Window` + `SDL_Renderer`
-  per `pc_window` preserves the existing per-window `ImGuiContext` design.
+  `third_party/imgui` is 1.92.9b, which ships `imgui_impl_sdl3` and, as the
+  renderer, `imgui_impl_sdlgpu3`; vendor those unmodified, like the
+  win32/dx11/metal backends already there. Upstream prefers SDL_gpu over
+  SDL_Renderer where both exist (its `docs/BACKENDS.md` says so), so the
+  renderer here is the GPU one rather than `imgui_impl_sdlrenderer3`.
+
+  One `SDL_GPUDevice` for the whole process with every `SDL_Window` claimed
+  onto it (`SDL_ClaimWindowForGPUDevice`), each window getting its own
+  swapchain. That preserves the existing per-window `ImGuiContext` design:
+  SDL_gpu wants a device per process with many windows on it, not a device per
+  window. On Linux that means the Vulkan driver, so `SDL_GPU_SHADERFORMAT_SPIRV`
+  and the backend's SPIR-V shader blobs; the swapchain is set to SDR, since the
+  panel's colours are authored as sRGB triples.
+
+  SDL_gpu has no `SDL_RenderReadPixels`, and a swapchain texture is
+  write-only, so **`--shot` cannot read the window's swapchain**. It reads an
+  offscreen texture instead: `imshell::sdl_read_pixels()` draws the frame into
+  a `COLOR_TARGET` texture it owns, copies that into a download transfer
+  buffer with `SDL_DownloadFromGPUTexture`, and maps it. That is SDL_gpu's
+  own readback path -- no compute shader needed -- so `--shot` works on Linux
+  like it does on the other two.
+
 * **Dialogs/modals: SDL3 native.** `SDL_ShowOpenFileDialog` /
   `SDL_ShowSaveFileDialog` (card open, MIDI file, new card) and
   `SDL_ShowMessageBox` (factory-reset confirm, card alerts) cover everything

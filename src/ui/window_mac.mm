@@ -7,11 +7,19 @@
 // file panels, with what the events mean decided in ui::app.
 
 #import <Cocoa/Cocoa.h>
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "window_mac.h"
 #include "app.h"
+#include "ui/rom_locate.h"
 
+#include "ui/imgui_shell.h"
+
+#include "imgui.h"
+
+#include <cstdio>
 #include <string>
 
 // Carbon's virtual key code for F5. Not worth pulling in <Carbon/Carbon.h>
@@ -23,9 +31,8 @@ static const unsigned short kKeyCodeF4 = 0x76;
 static const unsigned short kKeyCodeF5 = 0x60;
 
 // ---------------------------------------------------------------------------
-// The panel itself. A flipped NSView, so the context handed to the app already
-// has its origin top-left with y running down -- the same space GDI uses, and
-// the space compat/gdi.h's macOS side assumes.
+// The panel itself. A layer-hosted Metal view painting through Dear ImGui;
+// the panel's hit testing is written in the same top-left, y-down space.
 
 @interface SMUView : NSView
 {
@@ -34,11 +41,21 @@ static const unsigned short kKeyCodeF5 = 0x60;
 @private
 	NSTimer *_timer;
 	CGFloat  _scroll_accum;
+	// The panel renders through Metal + Dear ImGui. Same backend pair as the
+	// editor windows (pc_window_mac.mm); panel input stays shared.
+	CAMetalLayer *_mtl_layer;
+	id<MTLDevice> _mtl_dev;
+	id<MTLCommandQueue> _mtl_queue;
+	ImGuiContext *_imgui;
+	ui::im::fonts _fonts;
 }
 - (instancetype)initWithFrame:(NSRect)frame app:(ui::app *)app;
 - (void)tick:(NSTimer *)timer;
 - (void)showMenu:(NSEvent *)event;
 - (int)codeForEvent:(NSEvent *)event;
+- (BOOL)startImgui;
+- (void)renderImgui;
+- (void)syncMetalSize;
 @end
 
 @implementation SMUView
@@ -123,20 +140,47 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	[super setFrameSize:newSize];
 	if (_app)
 		_app->resized((int)newSize.width, (int)newSize.height);
+	[self syncMetalSize];
+}
+
+- (BOOL)startImgui
+{
+	_mtl_layer = ui::imshell::metal_attach(self, _mtl_dev, _mtl_queue);
+	if (!_mtl_layer)
+		return NO;
+	[self syncMetalSize];
+
+	_imgui = ui::imshell::new_context();
+	_fonts = ui::imshell::panel_fonts();
+	ImGui_ImplMetal_Init(_mtl_dev);
+	if (_app)
+		_app->panel.fonts_ready();
+	return YES;
+}
+
+- (void)syncMetalSize
+{
+	ui::imshell::metal_sync(_mtl_layer, self);
+}
+
+- (void)renderImgui
+{
+	if (!_imgui || !_app || !_mtl_layer)
+		return;
+	const NSRect b = [self bounds];
+	const CGFloat scale = [self.window backingScaleFactor];
+	ui::im::fonts fonts = _fonts;
+	ui::app *app = _app;
+	ui::imshell::metal_paint(_imgui, _mtl_layer, _mtl_queue,
+	                         float(b.size.width), float(b.size.height), float(scale),
+	                         ^(ImDrawList *dl) {
+	                             app->paint_main(dl, fonts, (int)b.size.width);
+	                         });
 }
 
 - (void)drawRect:(NSRect)dirty
 {
-	(void)dirty;
-	CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
-	if (!ctx || !_app)
-		return;
-	const NSRect b = [self bounds];
-	// The view's context is already top-left, y down: wrap it for the shared
-	// painter (the GDI-space call ui::app::paint_main expects)
-	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, (int)b.size.width, (int)b.size.height));
-	_app->paint_main(dc, (int)b.size.width);
-	DeleteDC(dc);
+	(void)dirty;   // the Metal layer presents itself; nothing to draw here
 }
 
 // ---- repainting
@@ -148,7 +192,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 - (void)tick:(NSTimer *)timer
 {
 	(void)timer;
-	[self setNeedsDisplay:YES];
+	[self renderImgui];    // timer work runs inside paint_main
 }
 
 - (void)viewDidMoveToWindow
@@ -447,6 +491,15 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	_view = [[SMUView alloc] initWithFrame:frame app:_app];
 	[_window setContentView:_view];
 	[_window makeFirstResponder:_view];
+	// The panel renders through Metal + Dear ImGui; without it there is
+	// no window.
+	if (![_view startImgui]) {
+		NSAlert *alert = [[NSAlert alloc] init];
+		[alert setMessageText:@"S-MU2000"];
+		[alert setInformativeText:@"Cannot use Metal"];
+		[alert runModal];
+		[NSApp terminate:nil];
+	}
 	[_window center];
 	[_window makeKeyAndOrderFront:nil];
 
@@ -472,6 +525,34 @@ static const unsigned short kKeyCodeF5 = 0x60;
 // ---------------------------------------------------------------------------
 
 namespace ui {
+
+// ROM の場所なしで起動したとき（ui/rom_locate.h）。窓を作る前なので、NSApplication を起こして
+// 案内（NSAlert）とフォルダを選ぶ窓（NSOpenPanel）を出す
+bool ask_roms_folder(const std::string &message, std::string &picked)
+{
+	@autoreleasepool {
+		[NSApplication sharedApplication];
+		[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+		[NSApp activateIgnoringOtherApps:YES];
+		NSAlert *alert = [[NSAlert alloc] init];
+		[alert setMessageText:@"S-MU2000"];
+		[alert setInformativeText:[NSString stringWithUTF8String:message.c_str()]];
+		[alert addButtonWithTitle:[NSString stringWithUTF8String:UI_TEXT(dlg_roms_pick, "Select ROM folder...")]];
+		[alert addButtonWithTitle:[NSString stringWithUTF8String:UI_TEXT(dlg_roms_quit, "Quit")]];
+		if ([alert runModal] != NSAlertFirstButtonReturn)
+			return false;
+		NSOpenPanel *panel = [NSOpenPanel openPanel];
+		[panel setCanChooseFiles:NO];
+		[panel setCanChooseDirectories:YES];
+		[panel setAllowsMultipleSelection:NO];
+		if ([panel runModal] != NSModalResponseOK)
+			return false;
+		NSURL *url = [[panel URLs] firstObject];
+		const char *path = url ? [[url path] UTF8String] : nullptr;
+		picked = path ? std::string(path) : std::string();
+		return !picked.empty();
+	}
+}
 
 std::string open_midi_file_panel()
 {

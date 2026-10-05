@@ -23,6 +23,7 @@ AUv2 を指し続ける。
 ```
 make auv3           build/S-MU2000.app を作る（中に .appex が入る）
 make install-auv3   ~/Applications へ複製する
+make auv3-roms      ROM を拡張のアプリケーションサポートへ入れる
 make auval3         auval で検査する（aumu SMU3 Trbh）
 build/autest        .appex を通さずその場で試す道具
 ```
@@ -35,7 +36,8 @@ build/autest        .appex を通さずその場で試す道具
 | `src/auv3/factory.mm` | `.appex` の入口（`NSExtensionPrincipalClass`） |
 | `src/auv3/view_controller.mm` | 画面の口。貼るのは `panel_nsview.mm` の 1 枚 |
 | `src/vst3/panel_nsview.mm` | パネルを貼った `NSView`。VST3・AUv2・AUv3 で共通 |
-| `src/auv3/main_app.mm` | 器のアプリ。音は出さない |
+| `src/auv3/main_app.mm` | 器のアプリ。音は出さない。ROM のインストールもする |
+| `src/roms_dir.h` | ROM ディレクトリに必要な物と、それを入れる方 |
 | `src/auv3/autotest.mm` | その場で登録して口と音と画面を確かめる |
 | `src/ui/midi_split.h` | MIDI OUT のバイト列を 1 メッセージずつに切る |
 | `packaging/auv3-*.plist` | 器と拡張の Info.plist（種別 SMU3） |
@@ -157,26 +159,70 @@ AUv2 の画面（`au/editor_mac.mm`）は engine を AU のハンドル越しに
 最後まで回したければ `S_MU2000_BOOT_SECONDS` に秒数を渡す（鍵に混ざる）。
 
 焼くときは空の HOME で走らせる。砂場の中のプラグインは NVRAM を持たない
-（容器が空）ので、作る側に自分の設定が混ざると鍵が変わり、焼いた写しが
+（容器が空）なので、作る側に自分の設定が混ざると鍵が変わり、焼いた写しが
 使われない。Makefile が `HOME=$$(mktemp -d)` でそれを避けている。
 
-## 砂場の中からは自分のバンドルしか読めない
+ROM を入れない既定のビルド（`make auv3`）は写しも焼かない。焼いた写しは
+`<appex>/Contents/Resources/bootcache` に入るので、それも ROM と同じ扱いで
+入れる・外すのを選ぶ（`AUV3_ROMS=none` は両方を消す）。配るのは ROM も写しも
+無い束にして、初回だけ 5〜8 秒待つ承受能力として受け入れる。
+
+## ROM は自分のアプリケーションサポートから読む
 
 登録されるということは砂場に入るということで、`$HOME` は容器
 （`~/Library/Containers/com.tarboh.smu2000.auv3.au/Data`）へすり替えられる。
-`~/Library/Application Support/S-MU2000/roms` も `roms.txt` の指す先も届かない。
+`roms.txt` の指す先や、`/Library/Application Support` のような共有の場所には
+届かない。
 
-読めるのは自分のバンドルの中なので、そこへ入れる:
+**ただし自分の容器の中のアプリケーションサポートには届く。** それは
+
+```
+~/Library/Containers/com.tarboh.smu2000.auv3.au/Data/Library/Application Support/S-MU2000
+```
+
+で、`log.txt` や起動の写しをすでに入っている場所そのものである。engine の
+`config_dir()`（`src/compat/paths.h`）がこの中を指すので、**ここへ置いた ROM は
+VST3 と同じ道で見つかる**。バンドルは見なくてよい。
+
+器アプリ（`src/auv3/main_app.mm`）がその場所へ入れる。一度起動して窓の
+「Install ROMs...」でフォルダを選ぶ。もし
+`~/Library/Application Support/S-MU2000/roms` に既に揃っていれば、
+「Install from Application Support」のボタンを押すだけでよい。窓なしでもできる:
+
+```
+open -a S-MU2000.app --args --install-roms /path/to/roms
+make auv3-roms AUV3_ROMS=roms     # 同じことをスクリプトから
+```
+
+複製するのは engine が読むファイルだけ（36MB）で、波形 banks の余分は入れない。
+一時名へ書いてから置き換えるので、途中で止めても半端な画像は残らない。
+
+### なぜ器アプリは砂場に入っていないのか
+
+容器は拡張の当中にある。**砂場に入ったプロセスは自分の容器にしか書けない**ので、
+ファイルの置き先は拡張の容器でなければならない。器アプリが
+`com.apple.security.app-sandbox` を持たないのはそのため
+（`packaging/auv3-app.entitlements`）。
+
+拡張側の権利書はそのまま（登録には砂場が要る、次節）。器アプリは何も自分の
+バンドルの外へ書かないので、砂場のないことの代償はない。
+
+### 開発中はバンドルに入れてよい
 
 ```
 make auv3 AUV3_ROMS=roms
 ```
 
 `<appex>/Contents/Resources/roms` に複製される。署名より前に入れること
-（後から足すと封が破れる）。
+（後から足すと封が破れる）。既定（AUV3_ROMS は空）では入れないので、配る
+bundle は ROM を持たない。入れられるのは開発を楽にするためだけで、
+配ることには不利に働く: **バンドルに ROM が入っているビルドは誰にも配れない**。
 
-ROM は配れないので既定では入れない。入れなければ登録も描き出しも普通に通り、
-音だけが出ない（記録に「ROM が見つからない」と探した場所が残る）。
+探す順番は「環境変数 → アプリケーションサポート → バンドルの隣 → 機械共通」
+（`src/vst3/engine.cpp`）。app support を先に聞くので、両方あるときは
+自分のものを採る。「ROM の揃った場所か」は 4MB のプログラム ROM と 8MB の
+波形 ROM 四つを**まとめて**見るので、半端にコピーされた場所があっても
+別の場所を探しに行く（engine は最初の一つで止まるため）。
 
 ## 登録には App Sandbox の権利が要る
 
@@ -189,9 +235,14 @@ macOS の app extension は砂場に入っていないと登録されない。
 * それでも `pluginkit` にも `auval -a` にも出てこない
 
 足りなかったのは `com.apple.security.app-sandbox` だけだった
-（`packaging/auv3-appex.entitlements`、器のアプリにも同じものを）。
-署名するときに `--entitlements` で渡す。証明書の種類は関係がない
-（ad-hoc でも登録される）。プロビジョニングプロファイルも要らなかった。
+（`packaging/auv3-appex.entitlements`）。署名するときに `--entitlements` で渡す。
+証明書の種類は関係がない（ad-hoc でも登録される）。プロビジョニングプロファイル
+も要らなかった。
+
+**Needs the sandbox on the extension, not on the container app.** 前節のとおり
+器アプリは ROM を拡張の容器へ入れるので砂場に入れてはいけない
+（`packaging/auv3-app.entitlements` は空）。器アプリが砂場に入っていても
+拡張の登録自体はそのまま通るので、動かないのは器アプリ側だけ。
 
 SH2 と MEG の JIT は `MAP_JIT` で写像する。堅めの実行環境では
 `com.apple.security.cs.allow-jit` が無いと JIT が通らず通訳に落ちる

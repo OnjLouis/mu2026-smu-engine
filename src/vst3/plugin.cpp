@@ -52,6 +52,7 @@
 
 #if defined(_WIN32)
 #include "compat/platform.h"      // windows.h (lean) for QueryPerformanceCounter
+#include "compat/crash_log.h"
 #endif
 
 #if defined(__APPLE__)
@@ -234,6 +235,7 @@ public:
 		m_msgs.reserve(8192);
 		m_engine.set_output_rate(smu2000::vst3::NATIVE_RATE);
 		m_qpc_freq = perf_frequency();
+		smu2000::vst3::engine::trace("create", this);
 
 		// 画面で値を触ったら、ホストへ伝える
 		m_engine.set_edit_handlers(
@@ -244,6 +246,7 @@ public:
 
 	virtual ~mu_plugin()
 	{
+		smu2000::vst3::engine::trace("destroy", this);
 		m_engine.set_edit_handlers(nullptr, nullptr);
 		if (m_handler)
 			m_handler->release();
@@ -294,11 +297,28 @@ public:
 	{
 		// ROM 読みと起動（音にして 4 秒ぶんの空回し）は時間がかかるので、
 		// ここでは走らせるだけ。終わるまでは無音を返す
+		smu2000::vst3::engine::trace("initialize", this);
+		m_engine.unpark();
 		m_engine.start();
 		return kResultOk;
 	}
 
-	tresult PLUGIN_API terminate() override { return kResultOk; }
+	// ホストからもらったものはここで手放す（VST3 の決まり）。ホストは terminate の後で
+	// IComponentHandler を消してから本体を release することがあり（FL Studio）、持ったままだと
+	// 最後の release で消えた物を触って落ちる。この DLL のコードを走るスレッドもここで止める
+	// （本体が手放されないまま DLL を外されても、消えたコードを走らないように）
+	tresult PLUGIN_API terminate() override
+	{
+		smu2000::vst3::engine::trace("terminate", this);
+		end_all_edits();
+		if (IComponentHandler *h = m_handler) {
+			m_handler = nullptr;
+			h->release();
+		}
+		m_engine.park();
+		smu2000::vst3::engine::trace("terminate done", this);
+		return kResultOk;
+	}
 
 	// ---- IComponent
 
@@ -358,11 +378,15 @@ public:
 	tresult PLUGIN_API getRoutingInfo(RoutingInfo &, RoutingInfo &) override
 	{ return kNotImplemented; }
 
-	tresult PLUGIN_API activateBus(MediaType, BusDirection, int32, TBool) override
-	{ return kResultOk; }
+	tresult PLUGIN_API activateBus(MediaType type, BusDirection dir, int32 index, TBool state) override
+	{
+		smu2000::vst3::engine::trace("activateBus", this, type * 100 + dir * 10 + index, state);
+		return kResultOk;
+	}
 
 	tresult PLUGIN_API setActive(TBool state) override
 	{
+		smu2000::vst3::engine::trace("setActive", this, state);
 		if (state) {
 			// **ここで起動を待ちきる。**setActive は本スレッドで呼ばれ、時間がかかって
 			// よいところなので、ここで待たないとホストは起動中の機械へ MIDI を流し始める。
@@ -531,6 +555,7 @@ public:
 	tresult PLUGIN_API setBusArrangements(SpeakerArrangement *inputs, int32 numIns,
 	                                      SpeakerArrangement *outputs, int32 numOuts) override
 	{
+		smu2000::vst3::engine::trace("setBusArrangements", this, numIns, numOuts);
 		if (numOuts == 1 && outputs[0] == SpeakerArr::kStereo &&
 		    (numIns == 0 || (numIns == 1 && inputs[0] == SpeakerArr::kStereo)))
 			return kResultTrue;
@@ -551,6 +576,7 @@ public:
 
 	tresult PLUGIN_API setupProcessing(ProcessSetup &setup) override
 	{
+		smu2000::vst3::engine::trace("setupProcessing", this, (long long)setup.sampleRate, setup.maxSamplesPerBlock);
 		m_rate = setup.sampleRate;
 		m_engine.set_output_rate(m_rate);
 		return kResultOk;
@@ -558,6 +584,7 @@ public:
 
 	tresult PLUGIN_API setProcessing(TBool state) override
 	{
+		smu2000::vst3::engine::trace("setProcessing", this, state);
 		if (!state)
 			m_hush.store(true);
 		// 動いているあいだ、機械に触れてよいのは音声スレッドだけ
@@ -762,6 +789,7 @@ public:
 
 	tresult PLUGIN_API setComponentHandler(IComponentHandler *handler) override
 	{
+		smu2000::vst3::engine::trace("setComponentHandler", this, handler != nullptr);
 		if (handler == m_handler)
 			return kResultOk;
 		end_all_edits();
@@ -776,9 +804,11 @@ public:
 	// 画面。実機のフロントパネル風。中身は gui.exe と同じ ui::panel
 	IPlugView *PLUGIN_API createView(FIDString name) override
 	{
+		smu2000::vst3::engine::trace("createView", this);
 		if (name && std::strcmp(name, ViewType::kEditor) != 0)
 			return nullptr;
-		return new smu2000::vst3::plug_view(m_engine);
+		// 画面は本体の参照を持つ（ホストが本体を先に手放しても、画面が消えるまで engine を残す）
+		return new smu2000::vst3::plug_view(m_engine, static_cast<IEditController *>(this));
 	}
 
 	// 音量は bridge が 1 つだけ持つ。Output パラメータも画面のつまみも同じ値
@@ -1374,8 +1404,31 @@ SMTG_EXPORT_SYMBOL IPluginFactory *PLUGIN_API GetPluginFactory()
 
 #if defined(_WIN32)
 
-__declspec(dllexport) bool InitDll() { return true; }
-__declspec(dllexport) bool ExitDll() { return true; }
+__declspec(dllexport) bool InitDll()
+{
+	smu2000::vst3::engine::trace("InitDll");
+	return true;
+}
+// DLL を外す直前。手放されずに残った本体があれば、そのスレッドを止めておく
+// （DllMain の中ではスレッドを待てないので、ここでやる）
+__declspec(dllexport) bool ExitDll()
+{
+	smu2000::vst3::engine::trace("ExitDll");
+	smu2000::vst3::engine::park_all();
+	smu2000::vst3::engine::trace("ExitDll done");
+	return true;
+}
+
+// 落ちたときの記録（crash.txt）を、DLL が入った時に仕掛け、外れる時に必ず外す。DllMain の中なので、
+// やるのは受け口の付け外しだけ（ファイルもスレッドも触らない）
+BOOL WINAPI DllMain(HINSTANCE self, DWORD reason, LPVOID)
+{
+	if (reason == DLL_PROCESS_ATTACH)
+		smu2000::crash_log::install_plugin(self);
+	else if (reason == DLL_PROCESS_DETACH)
+		smu2000::crash_log::uninstall_plugin();
+	return TRUE;
+}
 
 #elif defined(__APPLE__)
 
@@ -1388,7 +1441,11 @@ SMTG_EXPORT_SYMBOL bool bundleEntry(CFBundleRef bundle)
 	return true;
 }
 
-SMTG_EXPORT_SYMBOL bool bundleExit(void) { return true; }
+SMTG_EXPORT_SYMBOL bool bundleExit(void)
+{
+	smu2000::vst3::engine::park_all();
+	return true;
+}
 
 #endif
 

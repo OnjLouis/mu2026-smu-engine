@@ -22,7 +22,7 @@
 //   03 01 00  インサーション 2 種別      03 01 0C  そのパート
 
 #include "panel.h"
-#include "draw.h"
+#include "draw_imgui.h"
 #include "texts.h"
 #include "xg/fx_types.h"
 
@@ -185,28 +185,28 @@ void panel::step_fx(int ctl, int step, bridge &br)
 		br.send(m_xg.set(*p, 0, next));
 }
 
-
-void panel::draw_list(HDC dc, const spot &sp) const
+// The effects list through an ImDrawList.
+void panel::draw_list(ImDrawList *dl, const spot &sp) const
 {
-	round_box(dc, sp.r, RGB(40, 43, 48), RGB(88, 93, 100), int(4 * m_scale));
+	im::round_box(dl, sp.r, RGB(40, 43, 48), RGB(88, 93, 100), float(4 * m_scale));
 
 	const int edge = (sp.r.right - sp.r.left) / 6;
 	RECT inner = sp.r;
 	inner.left  += edge;
 	inner.right -= edge;
 	const std::string label = fx_text(sp.ctl);
-	text_in(dc, inner, label.c_str(), label == "--" ? TEXT_DIM : TEXT, m_font_small,
-	        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(inner), im::size_of(inner), label.c_str(),
+	            label == "--" ? TEXT_DIM : TEXT, m_fonts.small, m_fonts.small_px, true, true, false);
 
 	RECT l = sp.r, r = sp.r;
 	l.right = l.left + edge;
 	r.left  = r.right - edge;
 	bool at_min, at_max;
 	fx_bounds(sp.ctl, at_min, at_max);
-	text_in(dc, l, "<", at_min ? RGB(80, 84, 90) : ACCENT, m_font_small,
-	        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-	text_in(dc, r, ">", at_max ? RGB(80, 84, 90) : ACCENT, m_font_small,
-	        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(l), im::size_of(l), "<", at_min ? RGB(80, 84, 90) : ACCENT,
+	            m_fonts.small, m_fonts.small_px, true, true, false);
+	im::text_in(dl, im::pos_of(r), im::size_of(r), ">", at_max ? RGB(80, 84, 90) : ACCENT,
+	            m_fonts.small, m_fonts.small_px, true, true, false);
 }
 
 
@@ -224,53 +224,56 @@ void panel::build_effect_spots()
 	}
 }
 
-void panel::paint_effects(HDC dc, const char *status) const
+// effects page through ui/draw_imgui.h.
+void panel::paint_effects(ImDrawList *dl, const char *status) const
 {
 	RECT all{ 0, 0, m_w, m_h };
-	fill(dc, all, BODY);
+	im::fill(dl, all, BODY);
 	RECT top{ 0, 0, m_w, m_oy + int(26 * m_scale) };
-	fill(dc, top, BODY_TOP);
+	im::fill(dl, top, BODY_TOP);
 
-	text_in(dc, scale(20, 6, 460, 16),
-	        UI_TEXT(effects_title, "Effects (sending XG parameter changes)"), TEXT_DIM,
-	        m_font_small, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+	im::text_in(dl, im::pos_of(scale(20, 6, 460, 16)), im::size_of(scale(20, 6, 460, 16)),
+	            UI_TEXT(effects_title, "Effects (sending XG parameter changes)"), TEXT_DIM,
+	            m_fonts.small, m_fonts.small_px, false, true, false);
 
 	for (const fx_row &row : ROWS) {
-		text_in(dc, scale(20, row.y + 4, 120, 16), row.title, TEXT, m_font_small,
-		        DT_LEFT | DT_TOP | DT_SINGLELINE);
+		im::text_in(dl, im::pos_of(scale(20, row.y + 4, 120, 16)),
+		            im::size_of(scale(20, row.y + 4, 120, 16)),
+		            row.title, TEXT, m_fonts.small, m_fonts.small_px);
 		double x = COL_X;
 		for (int i = 0; i < 3; i++) {
 			if (row.ctl[i] == CTL_NONE)
 				continue;
-			text_in(dc, scale(x, row.y - 13, row.w[i], 12), row.label[i], TEXT_DIM,
-			        m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
+			im::text_in(dl, im::pos_of(scale(x, row.y - 13, row.w[i], 12)),
+			            im::size_of(scale(x, row.y - 13, row.w[i], 12)),
+			            row.label[i], TEXT_DIM, m_fonts.small, m_fonts.small_px);
 			x += row.w[i] + 24;
 		}
 	}
 
 	for (const spot &sp : m_spots) {
 		if (sp.kind == spot_kind::list)
-			draw_list(dc, sp);
+			draw_list(dl, sp);
 		else if (sp.kind == spot_kind::action) {
-			round_box(dc, sp.r, BTN_FACE, BTN_EDGE, int(5 * m_scale));
-			text_in(dc, sp.r, sp.label, TEXT, m_font_small,
-			        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+			im::round_box(dl, sp.r, BTN_FACE, BTN_EDGE, float(5 * m_scale));
+			im::text_in(dl, im::pos_of(sp.r), im::size_of(sp.r), sp.label, TEXT,
+			            m_fonts.small, m_fonts.small_px, true, true, false);
 		}
 	}
 
-	text_in(dc, scale(150, 356, 830, 20),
-	        UI_TEXT(effects_values_note, "Values are read back from the MU2000. Changes from the panel or songs appear here too."),
-	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
-	text_in(dc, scale(150, 324, 830, 34),
-	        UI_TEXT(effects_insertion_note, "Insertion works on the selected part. Variation can be used as insertion\n"
-                 "by setting CONNECT to INSERTION."),
-	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
+	im::text_in(dl, im::pos_of(scale(150, 356, 830, 20)), im::size_of(scale(150, 356, 830, 20)),
+	            UI_TEXT(effects_values_note, "Values are read back from the MU2000. Changes from the panel or songs appear here too."),
+	            RGB(104, 109, 116), m_fonts.small, m_fonts.small_px);
+	im::text_in(dl, im::pos_of(scale(150, 324, 830, 34)), im::size_of(scale(150, 324, 830, 34)),
+	            UI_TEXT(effects_insertion_note, "Insertion works on the selected part. Variation can be used as insertion\n"
+	                                            "by setting CONNECT to INSERTION."),
+	            RGB(104, 109, 116), m_fonts.small, m_fonts.small_px, false, false, true);
 
 	if (status && status[0])
-		text_in(dc, m_status, status, TEXT_DIM, m_font_small,
-		        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+		im::text_in(dl, im::pos_of(m_status), im::size_of(m_status), status,
+		            TEXT_DIM, m_fonts.small, m_fonts.small_px, false, true, false);
 
-	draw_tabs(dc);
+	draw_tabs(dl);
 }
 
 } // namespace ui

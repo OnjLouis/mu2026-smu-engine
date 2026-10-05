@@ -99,7 +99,7 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 	if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 		ImGui::OpenPopup("##typein");
 	if (ImGui::BeginPopup("##typein")) {
-		ImGui::TextDisabled("%s（%d-%d）", label, lo, hi);
+		ImGui::TextDisabled(UI_TEXT(cap_range1_fmt, "%s (%d-%d)"), label, lo, hi);
 		const ImGuiID typed_id = ImGui::GetID("typed");
 		ImGuiStorage *st = ImGui::GetStateStorage();
 		int typed = st->GetInt(typed_id, v);

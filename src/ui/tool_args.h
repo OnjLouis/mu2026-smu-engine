@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include "compat/cli_text.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,7 @@ inline void print_usage()
                                     "        [--fx-window] also open the insertion setup window (double-click an insertion cell in the list)\n"
                                     "        [--shapes-window] also open the part voice window (double-click a VIB picture etc. in the list)\n"
                                     "        [--master-window] also open the master window (double-click the master row)\n"
+                                    "        [--sampling-window] also open the sampling window\n"
                                     "        [--lang ja|en] language (else lang= in editor.ini, else the locale: Japanese iff it says ja)\n"
                                     "        [--help]      show this help\n"
                                     "        gui --dump-layout panel.txt   write out the current layout\n"
@@ -86,27 +88,27 @@ inline int parse_tool_args(int argc, char **argv, tool_args &a,
 		}
 		else if (!std::strcmp(argv[i], "--list")) {
 			const auto ins = midi_in::list();
-			std::printf("MIDI 入力（--midi 番号 / 画面からも選べる）:\n");
+			std::printf(CLI_T("MIDI inputs (--midi number; also selectable in the window):\n", "MIDI 入力（--midi 番号 / 画面からも選べる）:\n"));
 			for (size_t k = 0; k < ins.size(); k++)
 				std::printf("  %zu: %s\n", k, ins[k].c_str());
 			if (ins.empty())
-				std::printf("  （なし）\n");
+				std::printf(CLI_T("  (none)\n", "  （なし）\n"));
 			const auto outs = midi_out::list();
-			std::printf("MIDI 出力（--midiout 番号 / 受けたものをそのまま外へ）:\n");
+			std::printf(CLI_T("MIDI outputs (--midiout number; passes on what comes in):\n", "MIDI 出力（--midiout 番号 / 受けたものをそのまま外へ）:\n"));
 			for (size_t k = 0; k < outs.size(); k++)
 				std::printf("  %zu: %s\n", k, outs[k].c_str());
 			if (outs.empty())
-				std::printf("  （なし）\n");
+				std::printf(CLI_T("  (none)\n", "  （なし）\n"));
 			const auto aouts = audio_out::list();
-			std::printf("音声の出口（--audio に名前の一部）:\n");
+			std::printf(CLI_T("Audio outputs (give --audio part of a name):\n", "音声の出口（--audio に名前の一部）:\n"));
 			for (size_t k = 0; k < aouts.size(); k++)
 				std::printf("  %zu: %s\n", k, aouts[k].c_str());
 			const auto ains = audio_in::list();
-			std::printf("A/D INPUT（録音デバイス。画面から選ぶ）:\n");
+			std::printf(CLI_T("A/D INPUT (recording devices; choose one in the window):\n", "A/D INPUT（録音デバイス。画面から選ぶ）:\n"));
 			for (size_t k = 0; k < ains.size(); k++)
 				std::printf("  %zu: %s\n", k, ains[k].c_str());
 			if (ains.empty())
-				std::printf("  （なし）\n");
+				std::printf(CLI_T("  (none)\n", "  （なし）\n"));
 			return 0;
 		}
 		else if (!std::strcmp(argv[i], "--midi") && i + 1 < argc) a.in_dev[0] = std::atoi(argv[++i]);
@@ -162,11 +164,11 @@ inline int parse_tool_args(int argc, char **argv, tool_args &a,
 		if (!a.layout_path.empty())
 			l.load(a.layout_path, lerr);
 		if (!l.save(a.dump_layout)) {
-			std::fprintf(stderr, "%s に書けない\n", a.dump_layout.c_str());
+			std::fprintf(stderr, CLI_T("Cannot write %s\n", "%s に書けない\n"), a.dump_layout.c_str());
 			return 1;
 		}
-		std::printf("いまの配置を書き出した: %s\n", a.dump_layout.c_str());
-		std::printf("直したら --layout で渡すか、窓で F5 を押す\n");
+		std::printf(CLI_T("Wrote the current layout: %s\n", "いまの配置を書き出した: %s\n"), a.dump_layout.c_str());
+		std::printf(CLI_T("After editing it, pass it with --layout or press F5 in the window\n", "直したら --layout で渡すか、窓で F5 を押す\n"));
 		return 0;
 	}
 	return -1;

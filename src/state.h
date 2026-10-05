@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "compat/cli_text.h"
 #include "compat/mamecompat.h"
 
 #include <cstring>
@@ -49,7 +50,7 @@ public:
 			m_out->insert(m_out->end(), b, b + n);
 		} else {
 			if (m_at + n > m_len) {
-				fail("足りない");
+				fail(CLI_T("ran out of data", "足りない"));
 				return;
 			}
 			std::memcpy(p, m_in + m_at, n);
@@ -90,7 +91,7 @@ public:
 		raw(got, sizeof(got));
 		if (!m_out && m_ok && std::memcmp(got, buf, sizeof(buf)) != 0) {
 			char m[64];
-			std::snprintf(m, sizeof(m), "目印が違う（%s のところ）", name);
+			std::snprintf(m, sizeof(m), CLI_T("wrong marker (at %s)", "目印が違う（%s のところ）"), name);
 			fail(m);
 		}
 	}

@@ -1,0 +1,234 @@
+# Rolling "continuous" binaries (see doc/release-builds.md).
+#
+# Publishes ONE prerelease on tag `continuous`, overwritten on a schedule
+# (every 10h) + manual dispatch. Per-push validation stays in build.yml;
+# this workflow only publishes. AUv3 is excluded (needs baked ROMs).
+# Linux ships a tarball (bin/ + plugins/) plus a gui AppImage.
+#
+# Guards:
+# - `freshness` skips scheduled runs when main hasn't moved since the last
+#   continuous build (manual dispatches always build).
+# - every pkg job runs `make test` first; `publish` needs all three, so a
+#   broken main never overwrites the downloads.
+# - `publish` force-moves the `continuous` tag to the built commit BEFORE
+#   uploading: softprops/action-gh-release replaces assets in place but does
+#   not move the tag itself (see src/github.ts: update path calls
+#   repos.updateRelease, which leaves refs/tags/continuous where it was, so
+#   the auto-generated "Source code" archives would stay stale).
+# - third-party actions are pinned to commit SHAs (not floating majors) and
+#   appimagetool to a fixed release (1.9.1), so upstream changes can't
+#   silently end up in our binaries.
+
+name: continuous-release
+
+on:
+  schedule:
+    - cron: "0 */10 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: continuous-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Skip scheduled runs with nothing new: if refs/tags/continuous already
+  # points at the commit being built, there is nothing to publish.
+  freshness:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: always build"
+            exit 0
+          fi
+          TAG_SHA="$(git ls-remote "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" refs/tags/continuous | grep -v '\^{}' | head -1 | awk '{print $1}')"
+          echo "continuous tag: ${TAG_SHA:-<none>}, this run: ${{ github.sha }}"
+          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" = "${{ github.sha }}" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "main unchanged since last continuous build: skipping"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  pkg-windows:
+    needs: freshness
+    if: needs.freshness.outputs.build == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2 pinned
+        with:
+          msystem: mingw64
+          update: true
+          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-make mingw-w64-x86_64-python make
+      - run: make -j$(nproc) all
+      - run: make test
+      - run: bash scripts/package-windows.sh build dist-windows
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
+        with:
+          name: dist-windows
+          path: dist-windows
+
+  pkg-macos:
+    needs: freshness
+    if: needs.freshness.outputs.build == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned
+      - run: make -j$(sysctl -n hw.ncpu) UNIVERSAL=1 all
+      - run: make UNIVERSAL=1 clap
+      # UNIVERSAL=1 builds into build-universal/, so test and package that
+      - run: make UNIVERSAL=1 test
+      - run: bash scripts/package-macos.sh build-universal dist-macos
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
+        with:
+          name: dist-macos
+          path: dist-macos
+
+  pkg-linux:
+    needs: freshness
+    if: needs.freshness.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned
+      - run: >
+          sudo apt-get update -qq &&
+          sudo apt-get install -y -qq build-essential pkg-config cmake ninja-build git
+          libasound2-dev libfontconfig-dev libcairo2-dev
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
+          libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev libdecor-0-dev liburing-dev
+          libdrm-dev libgbm-dev libgl1-mesa-dev libegl1-mesa-dev libgles2-mesa-dev
+          libdbus-1-dev libibus-1.0-dev libudev-dev
+          file patchelf zsync
+      # Full SDL3 (video backends ON): the build.yml dummy-only SDL3 would
+      # ship a gui that shows nothing, so release builds its own.
+      - name: Cache SDL3 (release, full backends)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4 pinned
+        with:
+          path: ~/sdl3-release
+          key: sdl3-3.4.16-ubuntu24-full
+      - name: Build SDL3 (release)
+        run: |
+          test -f ~/sdl3-release/lib/libSDL3.so -o -f ~/sdl3-release/lib/x86_64-linux-gnu/libSDL3.so && exit 0
+          git clone --depth 1 --branch release-3.4.16 https://github.com/libsdl-org/SDL /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=$HOME/sdl3-release \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON
+          cmake --build /tmp/SDL/build
+          cmake --install /tmp/SDL/build
+      - run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3-release/lib/pkgconfig:$HOME/sdl3-release/lib/x86_64-linux-gnu/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/sdl3-release/lib:$HOME/sdl3-release/lib/x86_64-linux-gnu"
+          make -j$(nproc) all
+      - run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3-release/lib/pkgconfig:$HOME/sdl3-release/lib/x86_64-linux-gnu/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/sdl3-release/lib:$HOME/sdl3-release/lib/x86_64-linux-gnu"
+          SDL_VIDEODRIVER=dummy make test
+      - run: bash scripts/package-linux.sh build-linux dist-linux dist-linux.AppDir
+      - name: Build AppImage
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3-release/lib/pkgconfig:$HOME/sdl3-release/lib/x86_64-linux-gnu/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/sdl3-release/lib:$HOME/sdl3-release/lib/x86_64-linux-gnu"
+          # Bundle the release SDL3 alongside the ldd-collected libs.
+          for d in "$HOME/sdl3-release/lib" "$HOME/sdl3-release/lib/x86_64-linux-gnu"; do
+            [ -f "$d/libSDL3.so" ] && cp -fL "$d"/libSDL3.so* dist-linux.AppDir/usr/lib/ || true
+          done
+          # Pinned packager (1.9.1): the `continuous` appimagetool build moves
+          # under us (it has even shipped a `broken-zsyncmake` tag), and a
+          # silent packager change must never end up in our binaries.
+          curl -fsSL -o /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          VERSION="$(git rev-parse --short HEAD)" APPIMAGE_EXTRACT_AND_RUN=1 /tmp/appimagetool dist-linux.AppDir S-MU2000-x86_64.AppImage
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
+        with:
+          name: dist-linux
+          path: dist-linux
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 pinned
+        with:
+          name: linux-appimage
+          path: S-MU2000-x86_64.AppImage
+
+  publish:
+    needs: [freshness, pkg-windows, pkg-macos, pkg-linux]
+    if: needs.freshness.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4 pinned
+        with:
+          path: artifacts
+      - name: Move continuous tag to this commit
+        # The release action replaces assets in place but never moves
+        # refs/tags/continuous, so without this the tag and the auto-generated
+        # "Source code" archives would stay stuck on the very first build.
+        run: |
+          git tag -f continuous "${{ github.sha }}"
+          git push -f origin refs/tags/continuous
+      - run: |
+          SHA="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          MANUAL_URL="${{ github.server_url }}/${{ github.repository }}/blob/main/doc/manual.en.md"
+          echo "artifact tree:"; find artifacts -maxdepth 3 | sort
+          for d in artifacts/dist-windows artifacts/dist-macos artifacts/dist-linux; do
+            cat > "$d/README-release.txt" <<EOF
+          S-MU2000 continuous build $SHA ($DATE)
+          Unofficial project, not affiliated with Yamaha.
+
+          WARNING: unsigned, work-in-progress snapshot. It may be broken;
+          it is rebuilt from main about every 10 hours whether or not anyone
+          has looked at it. For something stable, wait for a versioned release.
+
+          ROMs are NOT included and never will be. Extract them from your own
+          MU2000 and point the app at the folder (argv, roms.txt, or
+          S_MU2000_ROMS). Step by step: $MANUAL_URL ("Preparing the ROMs").
+
+          Windows: unzip and run bin/gui.exe. No MSYS2 needed (statically linked).
+          macOS: NOT signed or notarized, so Gatekeeper will warn or refuse to
+            open it on first run:
+              xattr -dr com.apple.quarantine <file-or-bundle>
+            then right-click -> Open. VST3 -> ~/Library/Audio/Plug-Ins/VST3,
+            AU -> ~/Library/Audio/Plug-Ins/Components.
+          Linux: chmod +x S-MU2000-x86_64.AppImage for the gui; the tarball has
+            bin/ (render/live/...) + plugins/ (VST3/CLAP) for DAW/CLI use.
+          EOF
+          done
+          (cd artifacts/dist-windows && zip -r ../../S-MU2000-windows-x64.zip .)
+          (cd artifacts/dist-macos && zip -r -y ../../S-MU2000-macos-universal.zip .)
+          (cd artifacts/dist-linux && tar czf ../../S-MU2000-linux-x64.tar.gz .)
+          find artifacts -name '*.AppImage' -exec mv -f {} ./S-MU2000-x86_64.AppImage \;
+          chmod +x S-MU2000-x86_64.AppImage
+          ls -la S-MU2000-*
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3 pinned
+        with:
+          tag_name: continuous
+          target_commitish: ${{ github.sha }}
+          name: continuous build
+          prerelease: true
+          make_latest: true
+          body: |
+            Rolling build from `main` (about every 10h, skipped when main hasn't moved).
+
+            **Unsigned, work-in-progress snapshot — expect breakage.** macOS builds are
+            not signed or notarized, so Gatekeeper will warn (see `README-release.txt`
+            inside each archive for the `xattr` workaround).
+
+            **ROMs are never included.** You need your own MU2000 dumps; instructions:
+            [manual.en.md — Preparing the ROMs](${{ github.server_url }}/${{ github.repository }}/blob/main/doc/manual.en.md#2-preparing-the-roms) (or `README-release.txt`).
+          files: |
+            S-MU2000-windows-x64.zip
+            S-MU2000-macos-universal.zip
+            S-MU2000-linux-x64.tar.gz
+            S-MU2000-x86_64.AppImage

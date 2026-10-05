@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <link rel="icon" href="data:," />
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta
+            name="description"
+            content="S-MU2000: an open source Yamaha MU2000 emulator — desktop player, DAW plug-in, and browser demo."
+        />
+        <title>S-MU2000</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <header>
+            <h1>S-MU2000</h1>
+            <p class="lede">
+                An open source Yamaha MU2000 emulator. It runs the MU2000's own firmware, dumped
+                from your unit, as a desktop player with a hardware-style panel,
+                as a VST3 / CLAP / Audio Unit plug-in — or try it right
+                here in your browser below.
+            </p>
+        </header>
+
+        <figure class="hero">
+            <img
+                src="mu_screenshot.png"
+                alt="S-MU2000 synthesizer interface"
+                loading="lazy"
+            />
+            <figcaption class="note">
+                The native player pictured above is available for Windows, macOS
+                and Linux Desktop.
+            </figcaption>
+        </figure>
+
+        <h2>Web Demo</h2>
+        <p class="lede">
+            The MU2000 tone generator in your browser, emulated from its own
+            firmware and ROMs. Offline render runs the full emulation; live
+            playback starts in a lighter mode (Fast synth) so it keeps up on
+            ordinary PCs. Fully open source.
+        </p>
+
+        <div class="choices">
+            <a class="card" href="live.html">
+                <p><span class="badge">Realtime</span></p>
+                <h2>Live playback</h2>
+                <p>Boot the synth, play it from WebMIDI inputs in realtime.</p>
+                <p class="meta">Fast synth by default (full emulation needs a fast PC) · Chromium for WebMIDI</p>
+            </a>
+            <a class="card" href="play.html">
+                <p><span class="badge">Realtime</span></p>
+                <h2>MIDI playback</h2>
+                <p>Boot the synth, then play a MIDI file through it live.</p>
+                <p class="meta">Fast synth · playback progress · swap files anytime</p>
+            </a>
+            <a class="card" href="render.html">
+                <p><span class="badge">Exact</span></p>
+                <h2>Offline render</h2>
+                <p>
+                    Upload ROMs + a MIDI file, render to WAV, play or download.
+                </p>
+                <p class="meta">Same firmware as the native renderer</p>
+            </a>
+            <a
+                class="card"
+                href="https://github.com/tarboh/S-MU2000/blob/main/doc/manual.en.md"
+            >
+                <p><span class="badge">Desktop</span></p>
+                <h2>Download for desktop</h2>
+                <p>
+                    The full native player with its interface — build it
+                    yourself with the manual.
+                </p>
+                <p class="meta">Windows · Linux · macOS</p>
+            </a>
+        </div>
+
+        <div class="card">
+            <h2>Good to know</h2>
+            <ul class="ticks">
+                <li>
+                    ROMs stay on your machine — picked once, stored in the
+                    browser, never uploaded anywhere. Extract them from your
+                    own MU2000 —
+                    <a
+                        href="https://github.com/tarboh/S-MU2000/blob/main/doc/manual.en.md#2-preparing-the-roms"
+                        >Preparing the ROMs</a
+                    >.
+                </li>
+                <li>
+                    The desktop version gives you the full GUI panel access and full control.
+                    This is just a demo.
+                </li>
+                <li>
+                    Live playback needs a powerful computer; offline render is
+                    exact on any machine.
+                </li>
+            </ul>
+        </div>
+
+        <footer>
+            <a class="project-link" href="https://github.com/tarboh/S-MU2000">
+                View source on GitHub ↗
+            </a>
+        </footer>
+    </body>
+</html>

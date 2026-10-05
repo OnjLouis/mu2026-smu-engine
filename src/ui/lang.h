@@ -1,6 +1,6 @@
 // license:BSD-3-Clause
 //
-// The UI language, shared by the GDI panel strings (ui/texts.h) and the
+// The UI language, shared by the panel strings (ui/texts.h) and the
 // ImGui help texts (ui/xg_ui.cpp).
 //
 // One code per language, chosen once at startup. Precedence:

@@ -17,7 +17,9 @@
 
 #pragma once
 
+#include "compat/cli_text.h"
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -27,11 +29,13 @@
 
 #include "ui/audio_in.h"
 #include "ui/audio_out.h"
+#include "ui/audio_output_switch.h"
 #include "ui/bridge.h"
 #include "ui/engine.h"
 #include "ui/fx_editor.h"
 #include "ui/keymap.h"
 #include "ui/master_editor.h"
+#include "ui/sampling_editor.h"
 #include "ui/menu.h"
 #include "ui/options.h"
 #include "ui/overview.h"
@@ -92,6 +96,7 @@ public:
 	pc_window fx{ std::make_unique<fx_editor>() };
 	pc_window shapes{ std::make_unique<part_shapes>() };
 	pc_window master{ std::make_unique<master_editor>() };
+	pc_window sampling{ std::make_unique<sampling_editor>() };
 
 	struct engine *eng = nullptr;    // set once the ROMs are loaded
 	std::atomic<int> *state = nullptr; // the engine's, so menus can grey out
@@ -110,6 +115,11 @@ public:
 	midi_out    edit_out;
 	std::string out_keep, out_keep_b, out_keep_mu;
 	std::string audio_name;          // the audio device, by name
+	std::vector<std::string> audio_menu_devices;
+	std::atomic<bool> audio_ready{false};
+	int audio_latency = 20;
+	bool audio_exclusive = false;
+	bool audio_failed = false; // firmware is booted, but its output failed
 	std::string ain_name;            // the recording device, by name
 	std::string ain_keep;
 	std::string card_path;           // the SmartMedia in the slot, by path
@@ -135,32 +145,28 @@ public:
 
 	// ---- shared paint (the whole panel picture, status line included)
 
-	// The timer half of a frame: the panel tick and the PC windows. Windows
-	// runs it from WM_TIMER and paints from WM_PAINT; the Mac has one draw
-	// call and does both (paint_main below)
+	// The timer half of a frame: the panel tick and the PC windows. Each
+	// window runs it at 30 Hz, then paints through its draw list
+	// (paint_main below)
 	void frame_work()
 	{
+		run_deferred();
 		poll();
-		pc_frame_all(list, pc, fx, shapes, master, panel.xg(), panel.ram(), br,
+		serve_ain_requests();
+		pc_frame_all(list, pc, fx, shapes, master, sampling, panel.xg(), panel.ram(), br,
 		             [this](pc_window &w) { open_pc_window(w); });
 	}
 
-	// A full frame: timer work, status middle, panel paint. The HDC comes
-	// wrapped from either window system; the middle fragment and the PC
-	// window opening stay virtual (backend stats, host windows)
-	void paint_main(HDC dc, int w)
+	// A full frame: timer work, status middle, panel paint through the
+	// window's draw list. The middle fragment and the PC window opening
+	// stay virtual (backend stats, host windows)
+	void paint_main(ImDrawList *dl, const im::fonts &f, int w)
 	{
 		frame_work();
-		paint_frame(dc, w);
-	}
-
-	// The paint half, for a window that splits timer work from painting
-	void paint_frame(HDC dc, int w)
-	{
 		char middle[64] = {};
 		if (out && out->produced())
 			format_middle(middle, sizeof(middle));
-		paint_into(dc, w, middle);
+		paint_into(dl, w, middle, f);
 	}
 
 	// The wait/drop fragment for the status line (WASAPI: 待ち + 遅れ,
@@ -169,7 +175,7 @@ public:
 	// Opens one PC window (host windows differ)
 	virtual void open_pc_window(pc_window &w) = 0;
 
-	void paint_into(HDC dc, int w, const char *middle)
+	void paint_into(ImDrawList *dl, int w, const char *middle, const im::fonts &f)
 	{
 		snapshot s;
 		br.read(s);
@@ -186,9 +192,11 @@ public:
 		else
 			std::snprintf(status, sizeof(status), "%s", UI_TEXT(status_booting, "Starting..."));
 		panel.set_volume(br.gain());
-		panel.paint(dc, s, pressed, status);
-		// The bar paints after the panel (the panel fills everything)
-		bar.paint(dc, w);
+		panel.paint(dl, s, pressed, status);
+		// The bar paints after the panel (the panel fills everything). It keeps
+		// the window's fixed 16 px set: it does not scale with the panel, so the
+		// panel's own sizes would only make it jump around while resizing
+		bar.paint(dl, w, f.label, f.bar_px);
 	}
 
 	// ---- shared input decisions (both windows act the same way)
@@ -311,9 +319,9 @@ public:
 		std::string err;
 		if (!path.empty() && panel.lay().load(path, err)) {
 			if (!quiet)
-				std::printf("配置: %s\n", path.c_str());
+				std::printf(CLI_T("Layout: %s\n", "配置: %s\n"), path.c_str());
 		} else if (!path.empty() && !quiet) {
-			std::printf("配置: %s を開けない。組み込みの配置を使う\n", path.c_str());
+			std::printf(CLI_T("Layout: cannot open %s. Using the built-in layout\n", "配置: %s を開けない。組み込みの配置を使う\n"), path.c_str());
 		}
 		if (!err.empty())
 			std::fprintf(stderr, "%s", err.c_str());
@@ -331,7 +339,7 @@ public:
 		if (panel.on_card_slot(x, y))
 			return menu_card(menu_snapshot());
 		if (panel.on_phones(x, y))
-			return menu_phones(eng && eng->analog.load());
+			return menu_phones(menu_snapshot());
 		if (panel.on_ad_input(x, y))
 			return menu_ain_only(audio_in::list(), ain_name);
 		return menu_ports(menu_snapshot());
@@ -401,7 +409,7 @@ public:
 	// Open a PC window by BAR_* id (F2/F3, the strip, the menus)
 	void open_window_by_kind(int kind)
 	{
-		open_pc_window(*window_for_kind(kind, list, pc, fx, shapes, master));
+		open_pc_window(*window_for_kind(kind, list, pc, fx, shapes, master, sampling));
 	}
 
 	// ---- remembered settings (gui.ini)
@@ -427,6 +435,7 @@ public:
 		r.card      = card_path;
 		r.volume    = br.gain();
 		r.fold34    = play.fold_extra_ports();
+		r.thin_bends = play.thin_bends();
 		r.analog    = eng && eng->analog.load();
 		r.edit_out  = edit_out_name.empty() ? edit_out_keep : edit_out_name;
 		write_settings_file(path, collect_settings(r));
@@ -473,13 +482,13 @@ public:
 	bool choose_out(int dev, bool keep = false)
 	{
 		return open_out(thru_a, out_dev, out_name, out_keep,
-		                "MIDI 出力", dev, keep);
+		                CLI_T("MIDI output", "MIDI 出力"), dev, keep);
 	}
 
 	bool choose_out_b(int dev, bool keep = false)
 	{
 		return open_out(thru_b, out_dev_b, out_name_b, out_keep_b,
-		                "MIDI 出力 B", dev, keep);
+		                CLI_T("MIDI output B", "MIDI 出力 B"), dev, keep);
 	}
 
 	// 音色の窓の送り先。dev が負ならパネルの設定
@@ -498,7 +507,7 @@ public:
 				if (name == out_name || name == out_name_b || edit_out.open(dev, err))
 					edit_out_name = name;
 				else
-					std::fprintf(stderr, "送り先 %s: %s\n", name.c_str(), err.c_str());
+					std::fprintf(stderr, CLI_T("Send to %s: %s\n", "送り先 %s: %s\n"), name.c_str(), err.c_str());
 			}
 		}
 		save_settings();
@@ -532,7 +541,62 @@ public:
 	bool choose_out_mu(int dev, bool keep = false)
 	{
 		return open_out(mu_out, out_dev_mu, out_name_mu, out_keep_mu,
-		                "MIDI 出力（本体の OUT）", dev, keep);
+		                CLI_T("MIDI output (the unit's OUT)", "MIDI 出力（本体の OUT）"), dev, keep);
+	}
+
+	// サンプリングの窓の録音デバイスの欄（bridge::set_ain_devices / request_ain）。
+	// 一覧は窓が欄を開いたときと、選び直した後に作り直す（デバイスを数えるのは重いので毎コマはしない）。
+	//
+	// **パネルを描いている最中（frame_work の中）にデバイスを数えたり開いたりしない。** Windows の UI の糸は
+	// COM の STA なので、WASAPI を初めて使うときにたまっている窓のメッセージを処理することがあり、そこで
+	// パネルの WM_PAINT が入れ子で来ると、終わっていないコマの上で ImGui::NewFrame が呼ばれて assert で落ちた
+	// （作り直した exe の初回の起動で、起動が遅いときに出た）。一覧は別の糸で数え、選び直しは描画の外で行う
+	// （Windows は窓のメッセージで、ほかは次のコマの頭で。defer_outside_paint）
+	bool m_ain_listed = false;
+	std::atomic<bool> m_ain_listing{false};
+	std::thread m_ain_lister;
+	void list_ain_async()
+	{
+		if (m_ain_listing.exchange(true))
+			return;
+		if (m_ain_lister.joinable())
+			m_ain_lister.join();
+		const std::string current = ain_name;
+		m_ain_lister = std::thread([this, current] {
+			br.set_ain_devices(audio_in::list(), current);
+			m_ain_listing.store(false);
+		});
+	}
+	void serve_ain_requests()
+	{
+		if (br.take_ain_list_request() || !m_ain_listed) {
+			m_ain_listed = true;
+			list_ain_async();
+		}
+		const int want = br.take_ain_request();
+		if (want >= -1)
+			defer_outside_paint([this, want] {
+				choose_ain(want);
+				list_ain_async();
+			});
+		// サンプリングの窓の「カード」: 頼まれたカードを差し、差しているカードの場所を知らせる
+		std::string card;
+		if (br.take_card_request(card))
+			defer_outside_paint([this, card] {
+				if (insert_card(card))
+					save_settings();
+			});
+		br.set_card_path(card_path);
+	}
+	// 描画の外で行う仕事。Windows は窓のメッセージで（app_win.h）、ほかは次のコマの頭で
+	std::vector<std::function<void()>> m_deferred;
+	virtual void defer_outside_paint(std::function<void()> f) { m_deferred.push_back(std::move(f)); }
+	void run_deferred()
+	{
+		std::vector<std::function<void()>> todo;
+		todo.swap(m_deferred);
+		for (auto &f : todo)
+			f();
 	}
 
 	bool choose_ain(int dev, bool keep = false)
@@ -610,8 +674,9 @@ public:
 			return;
 		reported_drops = drops;
 		std::fprintf(stderr,
-		             "MIDI が多すぎるので捨てた: THRU A %llu / THRU B %llu / 受信 %llu バイト"
-		             "（MIDI の輪ができていないか確かめる）\n",
+		             CLI_T("Dropped MIDI, too much of it: THRU A %llu / THRU B %llu / received %llu bytes"
+" (check for a MIDI loop)\n", "MIDI が多すぎるので捨てた: THRU A %llu / THRU B %llu / 受信 %llu バイト"
+		             "（MIDI の輪ができていないか確かめる）\n"),
 		             (unsigned long long)eng->guard_a.dropped(),
 		             (unsigned long long)eng->guard_b.dropped(),
 		             (unsigned long long)eng->mu.midi_dropped());
@@ -624,7 +689,7 @@ public:
 	{
 		panel.tick(br);
 		if (out && out->produced())
-			br.set_cpu(float(out->cpu_percent()));
+			br.set_cpu(float(out->cpu_recent()));   // 直近の重さ（平均は終わりの集計に）
 		br.set_engine(eng ? eng->native_engine.load() : -1);
 		card_tick();
 		report_drops();
@@ -640,7 +705,7 @@ public:
 			eng->mu.card().eject();
 		}
 		if (!card_path.empty())
-			std::printf("SmartMedia を抜いた: %s\n", card_path.c_str());
+			std::printf(CLI_T("SmartMedia removed: %s\n", "SmartMedia を抜いた: %s\n"), card_path.c_str());
 		std::fflush(stdout);
 		card_path.clear();
 		save_settings();
@@ -665,25 +730,25 @@ public:
 		{
 			const std::lock_guard<std::mutex> hold(eng->card_lock);
 			eng->mu.card() = std::move(card);
+			eng->mu.card_swapped();   // firmware に抜けたのを見せる（前のカードの FAT を忘れさせる）
 		}
 		card_path = path;
-		std::printf("SmartMedia を差した: %s（%uMB）\n",
+		std::printf(CLI_T("SmartMedia inserted: %s (%uMB)\n", "SmartMedia を差した: %s（%uMB）\n"),
 		            path.c_str(), eng->mu.card().megabytes());
 		std::fflush(stdout);
 		save_settings();
 		return true;
 	}
 
-	// An empty card, in the physical layout a new one comes in. It has to
-	// be formatted by the machine (UTIL -> CARD -> Format) before it holds
-	// anything
+	// A new card, already formatted the way the machine's UTIL -> CARD ->
+	// Format leaves it (smartmedia::format), so it can be saved to at once
 	void new_card(u32 megabytes)
 	{
 		const std::string path = ask_card_save_path();
 		if (path.empty())
 			return;
 		smu2000::smartmedia card;
-		if (!card.create(megabytes)) {
+		if (!card.create(megabytes) || !card.format()) {
 			std::fprintf(stderr, "%s\n", UI_TEXT(dlg_card_create_fail, "Cannot create the SmartMedia image"));
 			return;
 		}
@@ -694,8 +759,8 @@ public:
 			return;
 		}
 		if (insert_card(path))
-			menu_note(UI_TEXT(dlg_fresh_card, "Inserted a blank SmartMedia image.\n"
-			                                  "Before use, format it on the machine: UTIL → CARD → Format."));
+			menu_note(UI_TEXT(dlg_fresh_card, "Inserted a new SmartMedia image.\n"
+			                                  "It is already formatted (as UTIL → CARD → Format leaves it), so it can be saved to right away."));
 	}
 
 	void do_card_open()
@@ -713,19 +778,19 @@ public:
 	{
 		std::string err;
 		if (!play.start(path, br, err)) {
-			std::fprintf(stderr, "開けない: %s\n", err.c_str());
+			std::fprintf(stderr, CLI_T("Cannot open: %s\n", "開けない: %s\n"), err.c_str());
 			char m[512];
 			std::snprintf(m, sizeof(m), UI_TEXT(dlg_cannot_fmt, "Cannot open: %s"), err.c_str());
 			menu_error(m);
 			return false;
 		}
-		std::printf("再生: %s（%.1f 秒）\n", path.c_str(), play.length());
+		std::printf(CLI_T("Playing: %s (%.1f s)\n", "再生: %s（%.1f 秒）\n"), path.c_str(), play.length());
 		// The machine has two ports, so a four-port file is either folded
 		// onto them or has its extra parts dropped
 		if (play.ports_used() > 2)
-			std::printf("  この曲は %d 口ぶん。C・D は未対応なので、口 3 以降は%s\n",
+			std::printf(CLI_T("  This song uses %d ports. C and D are not supported, so ports 3 and up are %s\n", "  この曲は %d 口ぶん。C・D は未対応なので、口 3 以降は%s\n"),
 			            play.ports_used(),
-			            play.fold_extra_ports() ? " A・B に重ねて鳴らす" : "鳴らさない");
+			            play.fold_extra_ports() ? CLI_T("played on top of A and B", " A・B に重ねて鳴らす") : CLI_T("not played", "鳴らさない"));
 		std::fflush(stdout);
 		return true;
 	}
@@ -738,6 +803,59 @@ public:
 	}
 
 	// ---- the rest of the menu
+
+	// Same backend contract on Windows, macOS and Linux. Device names come
+	// from the menu snapshot, never from a new enumeration after the click.
+	void choose_audio(int dev)
+	{
+		if (!audio_ready.load() || !out || !eng || !state || state->load() == 0)
+			return;
+		if (dev >= 0 && size_t(dev) >= audio_menu_devices.size())
+			return;
+		const std::string wanted = dev < 0 ? std::string() : audio_menu_devices[size_t(dev)];
+		join_reboot();
+		if (state->load() != 1 && !audio_failed)
+			return;
+		// Pause emulation while opening outputs; their initial callbacks may
+		// run before start() returns. Resume the existing machine afterward.
+		eng->state.store(0);
+		while (eng->in_fill.load())
+			smu2000::sleep_ms(1);
+#if defined(__APPLE__)
+		// The slave must leave the old AudioUnit's workgroup before that
+		// unit is disposed. Keep the threading policy, not just its current
+		// admission state (the instance limit may have parked the slave).
+		const bool threaded = eng->mu.threading_requested();
+		eng->mu.set_threaded(false);
+		eng->mu.set_realtime_workgroup(nullptr);
+#endif
+		const auto r = switch_audio_output(*out, audio_latency,
+			[this](s16 *o, u32 n) { eng->fill(o, n); },
+			audio_exclusive, wanted, audio_name);
+#if defined(__APPLE__)
+		if (r.selected || r.restored)
+			eng->mu.set_realtime_workgroup(out->realtime_workgroup());
+		eng->mu.set_threaded(threaded);
+#endif
+		audio_failed = !r.selected && !r.restored;
+		if (!audio_failed)
+			eng->state.store(1); // also recover a failed output at startup
+		if (r.selected) {
+			audio_name = wanted;
+			save_settings();
+			say_audio_opened(audio_exclusive);
+		} else {
+			if (!r.restored) {
+				eng->message = r.error;
+				eng->state.store(2);
+				eng->publish();
+			}
+			char error[2048];
+			std::snprintf(error, sizeof(error), UI_TEXT(audio_switch_failed_fmt,
+			              "Cannot switch audio output:\n%s"), r.error.c_str());
+			menu_error(error);
+		}
+	}
 
 	// Throwing the settings away means rebooting the machine, which takes
 	// tens of seconds, so it runs on its own thread (joined first: two
@@ -759,6 +877,12 @@ public:
 		save_settings();
 	}
 
+	void toggle_thin_bends()
+	{
+		play.set_thin_bends(!play.thin_bends());
+		save_settings();
+	}
+
 	void set_analog(bool on)
 	{
 		if (!eng)
@@ -766,7 +890,7 @@ public:
 		// Digital matches S/PDIF (some DPCM samples keep their DC, as on
 		// the hardware); analog cuts DC like LINE OUT and PHONES do
 		eng->analog.store(on);
-		std::printf("音の出口: %s\n", on ? "アナログ（直流を切る）" : "デジタル");
+		std::printf(CLI_T("Sound output: %s\n", "音の出口: %s\n"), on ? CLI_T("analogue (DC removed)", "アナログ（直流を切る）") : CLI_T("digital", "デジタル"));
 		std::fflush(stdout);
 		save_settings();
 	}
@@ -784,6 +908,11 @@ public:
 		s.midi_ins = midi_in::list();
 		s.midi_outs = midi_out::list();
 		s.audio_ins = audio_in::list();
+		s.audio_outs = audio_out::list();
+		audio_menu_devices = s.audio_outs;
+		s.audio_ready = audio_ready.load() && state && (state->load() == 1 || audio_failed);
+		if (s.audio_ready)
+			s.audio_name = audio_name;
 		for (int p = 0; p < 4; p++)
 			s.in_dev[p] = in_dev[p];
 		s.out_dev = out_dev;
@@ -794,9 +923,11 @@ public:
 		s.playing = play.playing();
 		s.play_name = play.name();
 		s.fold34 = play.fold_extra_ports();
+		s.thin_bends = play.thin_bends();
 		s.ready = eng && state && state->load() == 1;
 		s.native_fx = eng && eng->native_fx.load();
 		s.native_engine = eng && eng->native_engine.load();
+		s.analog = eng && eng->analog.load();
 		return s;
 	}
 
@@ -818,6 +949,8 @@ public:
 		else if (id >= ID_OUTB_BASE && id < ID_OUTB_BASE + 256)       choose_out_b(id - ID_OUTB_BASE);
 		else if (id == ID_AIN_NONE)                                   choose_ain(-1);
 		else if (id >= ID_AIN_BASE && id < ID_AIN_BASE + 256)         choose_ain(id - ID_AIN_BASE);
+		else if (id == ID_AUDIO_DEFAULT)                              choose_audio(-1);
+		else if (id >= ID_AUDIO_BASE && id < ID_AUDIO_BASE + 256)     choose_audio(id - ID_AUDIO_BASE);
 		else if (id == ID_CARD_OPEN)                                  do_card_open();
 		else if (id == ID_CARD_EJECT)                                 { eject_card(); save_settings(); }
 		else if (id >= ID_CARD_NEW16 && id <= ID_CARD_NEW128)         new_card(16u << (id - ID_CARD_NEW16));
@@ -825,6 +958,7 @@ public:
 		else if (id == ID_STOP_FILE)                                  play.stop();
 		else if (id == ID_PORTS34_FOLD)                               set_fold34(true);
 		else if (id == ID_PORTS34_DROP)                               set_fold34(false);
+		else if (id == ID_THIN_BENDS)                                 toggle_thin_bends();
 		else if (id == ID_NATIVE_FX)                                  toggle_fx();
 		else if (id == ID_NATIVE_ENGINE)                              toggle_engine();
 		else if (id == ID_FACTORY)                                    do_factory_reset();
@@ -878,8 +1012,8 @@ public:
 		// "a host is here" notice
 		eng.mu.set_usb_host(a.usb_host);
 		play.set_usb_ports(a.usb_host);        // ファイルの口 3・4 を C・D へ送るか
-		std::printf(a.usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
-		                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
+		std::printf(a.usb_host ? CLI_T("MIDI goes to the USB ports (A-D, 64 parts)\n", "MIDI は USB の口（A-D の 64 パート）\n")
+		                     : CLI_T("--host-midi: the DIN ports A and B only (parts 1-32)\n", "--host-midi: DIN の口 A・B だけ（パート 1-32）\n"));
 		return true;
 	}
 
@@ -908,7 +1042,7 @@ public:
 			if (!smf::load(a.shot_mid, evs, err)) {
 				std::fprintf(stderr, "%s\n", err.c_str());
 			} else {
-				std::printf("MIDI %zu 件を %.1f 秒ぶん流す\n", evs.size(), a.shot_secs);
+				std::printf(CLI_T("Feeding %zu MIDI events, %.1f s of them\n", "MIDI %zu 件を %.1f 秒ぶん流す\n"), evs.size(), a.shot_secs);
 				size_t at = 0;
 				s32 l, r;
 				for (size_t i = 0; i < size_t(a.shot_secs * AUDIO_RATE); i++) {
@@ -950,15 +1084,16 @@ public:
 			if (eng)
 				eng->analog.store(r.analog);
 			if (r.analog)
-				std::printf("音の出口: アナログ（直流を切る）\n");
+				std::printf(CLI_T("Sound output: analogue (DC removed)\n", "音の出口: アナログ（直流を切る）\n"));
 			play.set_fold_extra_ports(r.fold34);
+			play.set_thin_bends(r.thin_bends);
 		}
 		// Only the window boots from remembered settings: --shot must give
 		// the same picture every time
 		if (eng)
 			eng->use_nvram = !factory;
 		if (factory)
-			std::printf("工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n");
+			std::printf(CLI_T("Starting from factory defaults (the remembered settings are overwritten on exit)\n", "工場出荷状態で起動する（覚えていた設定は終わるときに上書きされる）\n"));
 	}
 
 	// A found port prints by name; a missing one keeps showing its
@@ -969,10 +1104,10 @@ public:
 		if (!now.empty())
 			std::printf("%s: %s\n", label, now.c_str());
 		else if (!keep.empty())
-			std::printf("%s: なし（「%s」が見つからないか開けない。覚えたままにしてある）\n",
+			std::printf(CLI_T("%s: none (\"%s\" was not found or could not be opened; it stays remembered)\n", "%s: なし（「%s」が見つからないか開けない。覚えたままにしてある）\n"),
 			            label, keep.c_str());
 		else
-			std::printf("%s: なし\n", label);
+			std::printf(CLI_T("%s: none\n", "%s: なし\n"), label);
 	}
 
 	// Opens the remembered MIDI ports by name (--midi and friends win).
@@ -1033,6 +1168,8 @@ public:
 			open_window_by_kind(BAR_SHAPES);
 		if (w.open_master && !w.lcd_only)
 			open_window_by_kind(BAR_MASTER);
+		if (w.open_sampling && !w.lcd_only)
+			open_window_by_kind(BAR_SAMPLING);
 	}
 
 	// Starts the audio device. False parks the engine on the failure and
@@ -1044,8 +1181,8 @@ public:
 		std::string err;
 		if (!out->start(latency_ms, [this](s16 *o, u32 n) { eng->fill(o, n); },
 		                err, exclusive, audio_name)) {
-			std::fprintf(stderr, "音声: %s\n", err.c_str());
-			eng->message = "音声デバイスを開けない";
+			std::fprintf(stderr, CLI_T("Audio: %s\n", "音声: %s\n"), err.c_str());
+			eng->message = CLI_T("cannot open the audio device", "音声デバイスを開けない");
 			eng->state.store(2);
 			eng->publish();
 			return false;
@@ -1053,7 +1190,18 @@ public:
 		// Remember the port that was actually opened, by name. After the
 		// MIDI ports above, or the settings written here would carry an
 		// empty MIDI name and the next start would come up with no ports
-		audio_name = out->device_name();
+		// Empty stays empty, so System default is still the default next time.
+		// Normalize CLI substring matches to a full menu label (ALSA labels
+		// include a description after the PCM name returned by device_name()).
+		if (!audio_name.empty()) {
+			const std::string opened = out->device_name();
+			audio_name = opened;
+			for (const auto &name : audio_out::list())
+				if (name == opened || name.substr(0, name.find("  (")) == opened) {
+					audio_name = name;
+					break;
+				}
+		}
 #if defined(__APPLE__)
 		// The parallel slave thread joins the output unit's audio workgroup
 		// from here (Apple's parallel real-time threads pattern; the join
@@ -1078,8 +1226,8 @@ public:
 			std::printf("A/D INPUT: %s（%s）\n", ain->device_name().c_str(),
 			            ain->format_line().c_str());
 		else
-			std::printf("A/D INPUT: なし（%s）\n",
-			            dev < 0 ? "デバイスが見つからない" : aerr.c_str());
+			std::printf(CLI_T("A/D INPUT: none (%s)\n", "A/D INPUT: なし（%s）\n"),
+			            dev < 0 ? CLI_T("device not found", "デバイスが見つからない") : aerr.c_str());
 		std::fflush(stdout);
 		save_settings();
 	}
@@ -1090,7 +1238,9 @@ public:
 	// The boot thread join stays in main (it owns the thread)
 	void shutdown()
 	{
-		pc_shutdown_all(list, pc, fx, shapes, master, br);
+		pc_shutdown_all(list, pc, fx, shapes, master, sampling, br);
+		if (m_ain_lister.joinable())
+			m_ain_lister.join();
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		// Stop a MIDI file first: its all-notes-off travels out through the
 		// audio thread, so stopping the sound first would leave the far-end
@@ -1122,14 +1272,14 @@ public:
 		if (eng) {
 			eng->settle_for_save();
 			if (eng->state.load() == 1 && !smu2000::nvram::save(eng->mu))
-				std::fprintf(stderr, "設定を残せなかった: %s\n",
+				std::fprintf(stderr, CLI_T("Could not save the settings: %s\n", "設定を残せなかった: %s\n"),
 				             smu2000::nvram::path(eng->mu).c_str());
 			// Snapshot for the settings just saved, or the next boot after
 			// touching them is the slow one. The window is gone, so the
 			// second it takes holds nobody up; old snapshots are pruned here
 			if (eng->state.load() == 1) {
 				if (smu2000::bootcache::refresh(eng->mu))
-					std::printf("次の起動ぶんの写しを作った\n");
+					std::printf(CLI_T("Made the boot copy for the next start\n", "次の起動ぶんの写しを作った\n"));
 				smu2000::bootcache::prune();
 			}
 		}
@@ -1147,7 +1297,7 @@ public:
 	void print_exit_stats(u64 drops)
 	{
 		if (out && out->produced()) {
-			std::printf("CPU %.1f%%、1 回の最悪 %.2f ms、間に合わなかった %llu 回\n",
+			std::printf(CLI_T("CPU %.1f%%, worst single block %.2f ms, late %llu times\n", "CPU %.1f%%、1 回の最悪 %.2f ms、間に合わなかった %llu 回\n"),
 			            out->cpu_percent(), out->worst_ms(),
 			            (unsigned long long)drops);
 			print_audio_details();
@@ -1168,6 +1318,8 @@ public:
 	        const window_options &wo)
 	{
 		keep_settings = a.nomidi;
+		audio_latency = a.latency;
+		audio_exclusive = oo.exclusive;
 		setup_for_window(a, wo, oo.factory);
 
 		// The remembered ports open on this thread, while the machine boots
@@ -1199,8 +1351,11 @@ public:
 			eng->state.store(1);
 			eng->publish();
 
-			if (!start_audio(a.latency, oo.exclusive))
+			if (!start_audio(a.latency, oo.exclusive)) {
+				audio_failed = true;
+				audio_ready.store(true); // PHONES can recover by picking another output
 				return;
+			}
 			say_audio_opened(oo.exclusive);
 			// A/D INPUT: open the recording device that was picked last time
 			start_ad();
@@ -1209,6 +1364,7 @@ public:
 				play_song(a.play_path);
 			say_audio_running();
 			std::fflush(stdout);
+			audio_ready.store(true); // all startup writes finish before UI switching
 		});
 
 		// --editor and friends, alongside the panel

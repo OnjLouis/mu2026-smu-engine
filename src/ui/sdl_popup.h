@@ -1,8 +1,8 @@
 // license:BSD-3-Clause
 //
 // Popup menus and native dialogs for the SDL3 front ends (gui and the
-// plug-in editor). SDL has no menus, so popups are drawn into the window:
-// Cairo text over the live panel, modal until chosen or cancelled. Two menu
+// plug-in editor). SDL has no menus, so popups draw over the live panel
+// through Dear ImGui, modal until chosen or cancelled. Two menu
 // levels at most (a category opens a second flat list), mirroring the
 // NSMenu/HMENU structure on the other platforms.
 //
@@ -17,6 +17,11 @@
 #pragma once
 
 #include <SDL3/SDL.h>
+
+#include "ui/draw_imgui.h"
+#include "ui/imgui_shell_sdl.h"     // imshell::sdl_state, the SDL_gpu window
+
+#include "imgui.h"
 
 #include <atomic>
 #include <functional>
@@ -36,11 +41,13 @@ struct item {
 	int  sub = -1;
 };
 
-// Modal: returns the chosen id, a submenu marker via sub_chosen, or -1.
-// behind() repaints the background bits (the live panel); this uploads and
+// Modal menu over the live panel: returns the chosen id, a submenu marker
+// via sub_chosen, or -1. behind() paints the live panel into the current
+// frame's background list; this draws the dim + box + rows on top and
 // presents. quit is set when the window closes underneath.
-int run(SDL_Window *win, SDL_Renderer *ren, SDL_Texture *tex, void *bits,
-        int ww, int wh, std::function<void()> behind, std::atomic<bool> &quit,
+int run(SDL_Window *win, imshell::sdl_state &st, ImGuiContext *ctx,
+        const im::fonts &fonts, int ww, int wh,
+        std::function<void(ImDrawList *)> behind, std::atomic<bool> &quit,
         const std::vector<item> &items, int x, int y, int &sub_chosen);
 
 struct file_filter {

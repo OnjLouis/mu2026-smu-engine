@@ -440,7 +440,7 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			ImGui::OpenPopup("##type");
 		if (ImGui::BeginPopup("##type")) {
-			ImGui::TextDisabled("%s %s（%d-%d）", master ? "MASTER" : part_name(part).c_str(), p ? p->label : c.title, lo, hi);
+			ImGui::TextDisabled(UI_TEXT(cap_range_fmt, "%s %s (%d-%d)"), master ? "MASTER" : part_name(part).c_str(), p ? p->label : c.title, lo, hi);
 			const ImGuiID typed_id = ImGui::GetID("typed");
 			ImGuiStorage *st = ImGui::GetStateStorage();
 			int typed = st->GetInt(typed_id, v);
@@ -3203,7 +3203,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		                   m.get(P("part.program"), part, prog);
 		msb = shown_bank_msb(part, m, msb);      // GS のドラム（issue #52）
 		bool has_rcv = m.get(P("part.rcv_channel"), part, rcv);
-		const bool silenced = m_saved_rcv[part] >= 0;
+		const bool silenced = this->silenced(part);
 		if (silenced) {
 			rcv = m_saved_rcv[part];                 // 表示は元のチャンネル
 			has_rcv = true;
@@ -3230,7 +3230,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		const float dot_w = dot * 2;
 		u16 rows[16];
 		if (vr) {
-			// パネルの LCD と同じ色（draw.h の LCD_BACK / LCD_GHOST / LCD_DOT）。
+			// パネルの LCD と同じ色（draw_imgui.h の LCD_BACK / LCD_GHOST / LCD_DOT）。
 			// 絵が引けないもの（ROM の版が違うなど）も、LCD の枠だけ出して並びを揃える
 			static const ImU32 LCD_BACK  = IM_COL32(150, 205, 45, 255);
 			static const ImU32 LCD_GHOST = IM_COL32(140, 194, 44, 255);
@@ -3351,7 +3351,7 @@ void overview::keys_cell(int part, int slot, const xg_snapshot &ram, bridge &br,
 		if (marker)
 			ImGui::SetItemTooltip("%s", UI_TEXT(ov_kb_audition_tip, "Left-click to play (lower is louder). Right-click to mark a key for voice audition, right-click again to clear it\n"
 			                                                  "Mark as many keys as you like for a chord; with no mark, changing voice plays nothing. Marks are per part and are not remembered\n"
-			                                                  "PC keyboard plays too: A W S E D F T G Y H U J K O L P ; from C (Z / X for octave)"));
+			                                                  "PC keyboard plays too, white keys only: the A row from C3, the Q row an octave up, the number row another octave up. Hold Z to flatten or X to sharpen what you play. Shift holds the modulation wheel up. PageUp / PageDown shift the octave"));
 		else
 			ImGui::SetItemTooltip("%s", UI_TEXT(ov_kb_play_tip, "Press to play (either mouse button). Lower is louder"));
 	}
@@ -3754,34 +3754,58 @@ void overview::mod_send(int part, int slot, int value, bridge &br)
 }
 
 
-void overview::pc_keys(int slot, bridge &br)
+// PC のキーボードで弾く。3 段とも白鍵だけを並べる（キーは文字でなく位置で読むので、配列が違っても同じ並び）:
+//   A 段（A から 12 個。日本語配列で A〜」）   m_pc_base（C3）からの白鍵
+//   Q 段（Q から 12 個。Q〜「）               その 1 オクターブ上
+//   数字の段（1 から 13 個。1〜￥）            さらに 1 オクターブ上
+// Z を押している間に弾いた鍵は半音下、X は半音上（黒鍵はこれで弾く）。Shift を押している間は
+// モジュレーション（CC1）を PC_MOD にし、離すと 0 に戻す。PageUp / PageDown で全体を 1 オクターブ動かす
+void overview::pc_keys(int part, int slot, bridge &br)
 {
-	static constexpr ImGuiKey KEYS[17] = {
-		ImGuiKey_A, ImGuiKey_W, ImGuiKey_S, ImGuiKey_E, ImGuiKey_D, ImGuiKey_F, ImGuiKey_T, ImGuiKey_G,
-		ImGuiKey_Y, ImGuiKey_H, ImGuiKey_U, ImGuiKey_J, ImGuiKey_K, ImGuiKey_O, ImGuiKey_L, ImGuiKey_P,
-		ImGuiKey_Semicolon,
+	static constexpr ImGuiKey KEYS[PC_KEYS] = {
+		ImGuiKey_A, ImGuiKey_S, ImGuiKey_D, ImGuiKey_F, ImGuiKey_G, ImGuiKey_H, ImGuiKey_J, ImGuiKey_K,
+		ImGuiKey_L, ImGuiKey_Semicolon, ImGuiKey_Apostrophe, ImGuiKey_Backslash,
+		ImGuiKey_Q, ImGuiKey_W, ImGuiKey_E, ImGuiKey_R, ImGuiKey_T, ImGuiKey_Y, ImGuiKey_U, ImGuiKey_I,
+		ImGuiKey_O, ImGuiKey_P, ImGuiKey_LeftBracket, ImGuiKey_RightBracket,
+		ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4, ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8,
+		ImGuiKey_9, ImGuiKey_0, ImGuiKey_Minus, ImGuiKey_Equal, ImGuiKey_Oem102,
 	};
+	// 段の中の何個目か → C からの半音（白鍵だけ）
+	static constexpr int WHITE[13] = { 0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21 };
+	auto offset = [](int i) { return i < 12 ? WHITE[i] : i < 24 ? 12 + WHITE[i - 12] : 24 + WHITE[i - 24]; };
 	ImGuiIO &io = ImGui::GetIO();
 	// 離したキー（窓から外れたときも ImGui がキーを離したことにする）
-	for (int i = 0; i < 17; i++) {
+	for (int i = 0; i < PC_KEYS; i++) {
 		if (m_pc_note[i] >= 0 && !ImGui::IsKeyDown(KEYS[i])) {
 			const u8 off[3] = { u8(0x80 | (m_pc_slot[i] & 15)), u8(m_pc_note[i]), 64 };
 			br.send_port(m_pc_slot[i] / 16, off, 3);
 			m_pc_note[i] = -1;
 		}
 	}
+	// Shift を離したら（文字の箱に入ったときも）モジュレーションを戻す
+	const bool typing = io.WantTextInput || io.KeyCtrl || io.KeyAlt || slot < 0;
+	if (m_pc_mod_slot >= 0 && (!io.KeyShift || typing)) {
+		mod_send(m_pc_mod_part, m_pc_mod_slot, 0, br);
+		m_pc_mod_slot = -1;
+	}
 	// 文字を打っている最中（数を打つ箱など）と、Ctrl・Alt を押しているときは弾かない
-	if (io.WantTextInput || io.KeyCtrl || io.KeyAlt || slot < 0)
+	if (typing)
 		return;
-	if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+	if (io.KeyShift && m_pc_mod_slot < 0) {
+		mod_send(part, slot, PC_MOD, br);
+		m_pc_mod_part = part;
+		m_pc_mod_slot = slot;
+	}
+	if (ImGui::IsKeyPressed(ImGuiKey_PageDown, false))
 		m_pc_base = std::max(0, m_pc_base - 12);
-	if (ImGui::IsKeyPressed(ImGuiKey_X, false))
-		m_pc_base = std::min(108, m_pc_base + 12);
-	for (int i = 0; i < 17; i++) {
+	if (ImGui::IsKeyPressed(ImGuiKey_PageUp, false))
+		m_pc_base = std::min(84, m_pc_base + 12);
+	const int shift = (ImGui::IsKeyDown(ImGuiKey_X) ? 1 : 0) - (ImGui::IsKeyDown(ImGuiKey_Z) ? 1 : 0);
+	for (int i = 0; i < PC_KEYS; i++) {
 		if (!ImGui::IsKeyPressed(KEYS[i], false) || m_pc_note[i] >= 0)
 			continue;
-		const int note = m_pc_base + i;
-		if (note > 127)
+		const int note = m_pc_base + offset(i) + shift;
+		if (note < 0 || note > 127)
 			continue;
 		const u8 on[3] = { u8(0x90 | (slot & 15)), u8(note), 100 };
 		br.send_port(slot / 16, on, 3);
@@ -3792,12 +3816,16 @@ void overview::pc_keys(int slot, bridge &br)
 
 void overview::release_pc_keys(bridge &br)
 {
-	for (int i = 0; i < 17; i++) {
+	for (int i = 0; i < PC_KEYS; i++) {
 		if (m_pc_note[i] < 0)
 			continue;
 		const u8 off[3] = { u8(0x80 | (m_pc_slot[i] & 15)), u8(m_pc_note[i]), 64 };
 		br.send_port(m_pc_slot[i] / 16, off, 3);
 		m_pc_note[i] = -1;
+	}
+	if (m_pc_mod_slot >= 0) {
+		mod_send(m_pc_mod_part, m_pc_mod_slot, 0, br);
+		m_pc_mod_slot = -1;
 	}
 }
 
@@ -4198,7 +4226,7 @@ void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge
 	// 「ゆれ」の区画にあり、鍵盤の幅を削ってまで置くものではない）
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y));
 	keys_cell(part, slot, ram, br, std::max(fs * 8.0f, right - origin.x), h, true, m_pc_base);
-	pc_keys(slot, br);
+	pc_keys(part, slot, br);
 
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y + h));
 	ImGui::Dummy(ImVec2(0, 0));
@@ -4230,7 +4258,7 @@ void overview::variation_label(int part, xg::model &m, bridge &br, float x0, flo
 	char text[96];
 	const std::string name = has_type ? xg::fx_name(type) : std::string("--");
 	if (conn == 0)
-		std::snprintf(text, sizeof(text), "%s（INSERTION → %s）", name.c_str(),
+		std::snprintf(text, sizeof(text), UI_TEXT(cap_insertion_fmt, "%s (INSERTION -> %s)"), name.c_str(),
 		              who < PARTS + 2 ? part_name(who).c_str() : "OFF");
 	else
 		std::snprintf(text, sizeof(text), "%s", name.c_str());
@@ -4293,42 +4321,27 @@ void overview::mute_buttons(int part, float px, float py, float w, float h)
 }
 
 
+// ミュートとソロ。消すパートを音源に伝え、音源がそのパートの声をミックスの手前で 0 にする（mu2000::set_part_mute）。
+// 前は XG の受信チャンネルを OFF にしていたが、firmware が MIDI を受けないデモ曲の再生中は効かなかった（イシュー #113）。
+// いまは MIDI を通さないので、曲の設定も書き換えない
 void overview::apply_mutes(xg::model &m, bridge &br)
 {
-	bool any_solo = false;
+	(void)m;
+	u64 mask = 0;
 	for (int p = 0; p < PARTS; p++)
-		any_solo |= m_solo[p];
-	const xg::param &prcv = P("part.rcv_channel");
-	for (int p = 0; p < PARTS; p++) {
-		const bool want = m_mute[p] || (any_solo && !m_solo[p]);
-		int rcv = 127;
-		const bool known = m.get(prcv, p, rcv);
-		if (m_saved_rcv[p] >= 0 && known && rcv != 127)
-			m_saved_rcv[p] = -1;                    // 曲などが受信チャンネルを書き換えた
-		if (want && m_saved_rcv[p] < 0 && known && rcv < PARTS) {
-			// 鳴っている音を先に止める（受信を切るとノートオフも届かなくなるため）
-			const u8 off[3] = { u8(0xb0 | (rcv & 15)), 120, 0 };
-			br.send_port(rcv / 16, off, 3);
-			br.send(m.set(prcv, p, 127));
-			m_saved_rcv[p] = rcv;
-		} else if (!want && m_saved_rcv[p] >= 0) {
-			br.send(m.set(prcv, p, m_saved_rcv[p]));
-			m_saved_rcv[p] = -1;
-		}
-	}
+		if (silenced(p))
+			mask |= u64(1) << p;
+	br.set_part_mute(mask);
 }
 
 
 void overview::hidden(bridge &br)
 {
 	release_keys(br);
-	// ミュートとソロは、この窓で聞き比べるためのもの。閉じたら外す（受信チャンネルを戻す）
-	for (int p = 0; p < PARTS; p++) {
+	// ミュートとソロは、この窓で聞き比べるためのもの。閉じたら外す
+	for (int p = 0; p < PARTS; p++)
 		m_mute[p] = m_solo[p] = false;
-		if (m_saved_rcv[p] >= 0 && m_model)
-			br.send(m_model->set(P("part.rcv_channel"), p, m_saved_rcv[p]));
-		m_saved_rcv[p] = -1;
-	}
+	br.set_part_mute(0);
 }
 
 

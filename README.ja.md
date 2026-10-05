@@ -4,7 +4,11 @@
 
 Yamaha MU2000 のソフトウェア音源。DAW に挿して使えることを目指す。
 
+![Screenshot](doc/mu_screenshot.png)
+
 **現在の状態: VST3・CLAP（Windows）と VST3・Audio Unit（macOS）として DAW に挿して鳴る。実機のフロントパネル風の画面と、PC で触るエディタが付いた。**
+
+**[ブラウザで試す](https://tarboh.github.io/S-MU2000/)**（オフライン書き出し＋ライブ演奏。自分の MU2000 から取り出した ROM が要る）。
 
 作りかけを晒しながら進めている。X では `#S_MU2000`。
 
@@ -85,6 +89,11 @@ rom ディレクトリには次を置く。
 | `dump/xv364a0.ic49` ほか 3 つ | 波形 ROM 8MB × 4                         |
 | `standin/sin-table.bin`       | MEG が使う sin 表 64KB                   |
 
+gui とプラグインは、同じ順番でこのディレクトリを探す（環境変数 `S_MU2000_ROMS`、設定のフォルダの `roms`
+かそこにある場所を書いた `roms.txt`、プログラムの横、など）。**gui を ROM の場所なしで起動する**と
+（ダブルクリックなど）そこを探し、見つからなければフォルダを選んでもらって、設定のフォルダの `roms.txt` に
+書く。次からは gui もプラグインも ROM を見つける。
+
 - プログラム ROM は**吸い出さなくていい**。ヤマハが公開している更新プログラム
   （`mu2r1_uw.zip`）から復元できる。中身は Flash 書き込みの SysEx をそのまま
   収めた MIDI ファイルで、組み直すと MAME 登録の SHA1 に一致する
@@ -118,6 +127,10 @@ build/render.exe <rom ディレクトリ> <MIDI> <出力 wav> [秒数]  ファ�
                  [--usb]                            USB の口で起動し、曲の口 1-4 を A-D へ渡す
                  [--fast-midi]                      firmware が読める速さで MIDI を渡す
                  [--card 絵.img] [--adc-in 入力.wav]  SmartMedia を差す／A/D INPUT に流す
+                 [--sample-rate Hz] [--bit-depth 8|16|24|32]  出力の形（既定は 44100Hz・16bit。32 は浮動小数）
+                 [--gain x] [--normalize]           音量を何倍かにする／満杯までそろえる
+                                                    引数なしで起動すると、引数の一覧が出る。
+                                                    コマンドラインの表示は英語が既定で、-jp を付けると日本語
 build/panel.exe  <rom ディレクトリ> [--keys "play,edit"] [--list]  パネルを文字だけで動かす
 build/boot.exe   <rom ディレクトリ> [サイクル数]       起動の確認
 build/statetest.exe <rom ディレクトリ> [MIDI]          状態の保存と復元が正しいかを確かめる

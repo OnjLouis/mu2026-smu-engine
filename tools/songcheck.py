@@ -278,11 +278,12 @@ def render(render_bin, roms, midi, wav, seconds, reuse=False):
     p = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if p.returncode != 0:
         raise RuntimeError(f"render failed: {' '.join(cmd)}\n{p.stdout}\n{p.stderr}")
-    m = re.search(r"起動に ([\d.]+) 秒", p.stdout + p.stderr)
+    m = re.search(r"(?:起動に ([\d.]+) 秒|Booted in ([\d.]+) s)", p.stdout + p.stderr)
     if not m:
         raise RuntimeError("render did not report the boot time; cannot align the WAV to the MIDI")
-    side.write_text(m.group(1))
-    return float(m.group(1))
+    boot = m.group(1) or m.group(2)
+    side.write_text(boot)
+    return float(boot)
 
 
 def read_wav(path):

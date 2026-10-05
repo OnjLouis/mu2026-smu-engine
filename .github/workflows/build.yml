@@ -21,6 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: make -j$(sysctl -n hw.ncpu) all
       - run: make auv3 AUV3_ROMS=none clap
+      - run: make check-audio-output
       - run: python3 tools/check_texts.py
       - run: make test
 
@@ -40,6 +41,7 @@ jobs:
         with:
           path: ~/sdl3
           key: sdl3-3.4.16-ubuntu24
+      - run: make check-audio-output
       - name: Build SDL3
         run: |
           test -f ~/sdl3/lib/libSDL3.so -o -f ~/sdl3/lib/x86_64-linux-gnu/libSDL3.so && exit 0
@@ -78,6 +80,7 @@ jobs:
           msystem: mingw64
           update: true
           install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-make mingw-w64-x86_64-python make
+      - run: make check-audio-output
       - run: make -j$(nproc) all
       - run: python3 tools/check_texts.py
       - run: make test

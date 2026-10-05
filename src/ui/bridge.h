@@ -15,11 +15,15 @@
 
 #include "snapshot.h"
 #include "mu2000.h"
+#include "panel_macro.h"
 
 #include <atomic>
 #include <cstring>
+#include <array>
 #include <deque>
+#include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace ui {
@@ -213,6 +217,9 @@ public:
 	static constexpr size_t SCOPE_N = 4096;
 	void want_scope(int part) { m_scope_want.store(part, std::memory_order_relaxed); }
 	int scope_wanted() const { return m_scope_want.load(std::memory_order_relaxed); }
+	// 音源の中で消すパート（bit n = パート n）。一覧のミュート・ソロが入れる（mu2000::set_part_mute）
+	void set_part_mute(u64 mask) { m_part_mute.store(mask, std::memory_order_relaxed); }
+	u64 part_mute() const { return m_part_mute.load(std::memory_order_relaxed); }
 	// 置くもの: 0 が声の和（mu2000::scope_read）、1 + fx × 2 + out がエフェクト fx（mu2000::scope_fx）の
 	// 入口（out = 0。MEG への送り）と出口（out = 1）。all は SCOPE_SRCS × SCOPE_N 個を続けて
 	static constexpr int SCOPE_SRCS = 1 + 2 * mu2000::SCOPE_FX_N;
@@ -281,7 +288,186 @@ public:
 		m_seq.fetch_add(1, std::memory_order_release);
 	}
 
+	// ---- サンプリングの窓（src/ui/sampling_editor.cpp）
+	// 窓は音源に触らない。音源の表を読み書きする仕事は post で音を作る糸へ渡し、その糸が
+	// driver::sampling_tick で実行して、結果（一言）と表の写しを返す
+	using sampling_job = std::function<std::string(mu2000 &)>;
+	struct sampling_view
+	{
+		std::vector<smu2000::sampling::sample> samples;
+		std::array<smu2000::sampling::voice, smu2000::sampling::MAX_VOICES> voices{};
+		u32 free_frames = 0;
+		int rec_state = 0;            // mu2000::rec_state
+		u32 rec_frames = 0;
+		s32 peak[2] = {};             // A/D INPUT のピーク（16bit の絶対値）
+		std::string message;          // 直前の仕事の結果
+		u64 serial = 0;               // 写しを作るたびに 1 増える
+		bool ready = false;           // 音源が起動を終えた
+		// 窓が選んだサンプルの見取り図（request_overview）。波形を WAVE_BUCKETS 個に分けた最小と最大
+		int wave_number = 0;
+		u32 wave_frames = 0;
+		u32 wave_from = 0, wave_to = 0;   // 見取り図にした範囲（サンプルの位置）
+		int preview_number = 0;           // 試聴しているサンプル（0 = していない、-1 = 外の PCM）
+		bool macro_busy = false;          // ボタンのマクロ（request_macro）が回っている
+		bool card_in = false;             // 差し込み口に SmartMedia がある
+		u32 preview_pos = 0;              // 試聴している位置（サンプルの位置）
+		std::vector<s16> wave_lo, wave_hi;
+		// 拡大した部分の波形（request_detail）。区切りは DETAIL_BUCKETS 個まで（範囲が狭ければ 1 サンプルに 1 つ）
+		struct slice
+		{
+			int number = 0;
+			u32 from = 0, to = 0;
+			std::vector<s16> lo, hi;
+		};
+		std::array<slice, 6> details;
+	};
+	static constexpr int WAVE_BUCKETS = 1024;
+	static constexpr int DETAIL_BUCKETS = 1024;
+	static constexpr int DETAIL_SLOTS = 6;
+	// 拡大した部分の波形を作ってほしい範囲（slot ごと。number が 0 なら要らない）
+	void request_detail(int slot, int number, u32 from, u32 to)
+	{
+		std::lock_guard<std::mutex> lock(m_wave_lock);
+		m_detail_want[size_t(slot)] = { number, from, to };
+	}
+	// 見取り図を作ってほしいサンプル（0 = 要らない）
+	// from, to はサンプルの位置（0, 0 なら全体）。拡大したときはその範囲だけ
+	void request_overview(int number, u32 from = 0, u32 to = 0)
+	{
+		std::lock_guard<std::mutex> lock(m_wave_lock);
+		m_wave_want = { number, from, to };
+	}
+	struct overview_req { int number = 0; u32 from = 0, to = 0; };
+	overview_req overview_wanted() const
+	{
+		std::lock_guard<std::mutex> lock(m_wave_lock);
+		return m_wave_want;
+	}
+	std::array<overview_req, DETAIL_SLOTS> details_wanted() const
+	{
+		std::lock_guard<std::mutex> lock(m_wave_lock);
+		return m_detail_want;
+	}
+	void post(sampling_job job)
+	{
+		std::lock_guard<std::mutex> lock(m_job_lock);
+		m_jobs.push_back(std::move(job));
+	}
+	// 音を作る糸から。待たずに取れた分だけ
+	bool take_job(sampling_job &out)
+	{
+		std::unique_lock<std::mutex> lock(m_job_lock, std::try_to_lock);
+		if (!lock.owns_lock() || m_jobs.empty())
+			return false;
+		out = std::move(m_jobs.front());
+		m_jobs.pop_front();
+		return true;
+	}
+	void put_sampling(sampling_view &v)
+	{
+		std::unique_lock<std::mutex> lock(m_view_lock, std::try_to_lock);
+		if (!lock.owns_lock())
+			return;                     // 窓が読んでいる最中なら次の回に
+		v.serial = m_view.serial + 1;
+		std::swap(m_view, v);
+	}
+	void get_sampling(sampling_view &out) const
+	{
+		std::lock_guard<std::mutex> lock(m_view_lock);
+		out = m_view;
+	}
+	// 録音デバイスの選択（gui の A/D INPUT。プラグインではホストのバスなので使わない）。
+	// 名前の一覧と今の名前は gui が置き、窓が選んだ番号（-1 = 無し）を gui が拾って開き直す
+	void set_ain_devices(std::vector<std::string> names, std::string current)
+	{
+		std::lock_guard<std::mutex> lock(m_ain_lock);
+		m_ain_names = std::move(names);
+		m_ain_current = std::move(current);
+		m_ain_known = true;
+	}
+	bool ain_devices(std::vector<std::string> &names, std::string &current) const
+	{
+		std::lock_guard<std::mutex> lock(m_ain_lock);
+		names = m_ain_names;
+		current = m_ain_current;
+		return m_ain_known;
+	}
+	void request_ain(int dev) { m_ain_want.store(dev, std::memory_order_relaxed); }
+	// gui から。選ばれていれば番号（-1 = 無し）、無ければ -2
+	int take_ain_request() { return m_ain_want.exchange(-2, std::memory_order_relaxed); }
+	void request_ain_list() { m_ain_list_want.store(true, std::memory_order_relaxed); }
+	bool take_ain_list_request() { return m_ain_list_want.exchange(false, std::memory_order_relaxed); }
+
+	// SmartMedia の差し込み口（サンプリングの窓の「カード」）。差しているカードの場所は gui・プラグインが
+	// 置き（空 = 差していない）、窓が「このカードを差す」と頼んだ場所を gui・プラグインが拾って差す
+	void set_card_path(const std::string &path)
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		if (m_card_path != path)
+			m_card_path = path;
+	}
+	std::string card_path() const
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		return m_card_path;
+	}
+	void request_card(const std::string &path)
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		m_card_want = path;
+		m_card_wanted = true;
+	}
+	bool take_card_request(std::string &path)
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		if (!m_card_wanted)
+			return false;
+		m_card_wanted = false;
+		path = m_card_want;
+		return true;
+	}
+
+	// 前面のボタンを決まった順に押す（panel_macro.h）。音を作る糸の driver が拾って回し、終わったら
+	// done（失敗ならその理由）を sampling_view::message に出す。回っている間は sampling_view::macro_busy
+	void request_macro(std::vector<panel_macro::step> steps, std::string done)
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		m_macro_want = std::move(steps);
+		m_macro_done = std::move(done);
+		m_macro_wanted = true;
+	}
+	bool take_macro_request(std::vector<panel_macro::step> &steps, std::string &done)
+	{
+		std::lock_guard<std::mutex> lock(m_card_lock);
+		if (!m_macro_wanted)
+			return false;
+		m_macro_wanted = false;
+		steps = std::move(m_macro_want);
+		done = std::move(m_macro_done);
+		return true;
+	}
+
 private:
+	std::vector<panel_macro::step> m_macro_want;
+	std::string m_macro_done;
+	bool m_macro_wanted = false;
+	mutable std::mutex m_card_lock;
+	std::string m_card_path, m_card_want;
+	bool m_card_wanted = false;
+	mutable std::mutex m_job_lock;
+	std::deque<sampling_job> m_jobs;
+	mutable std::mutex m_view_lock;
+	sampling_view m_view;
+	mutable std::mutex m_ain_lock;
+	std::vector<std::string> m_ain_names;
+	std::string m_ain_current;
+	bool m_ain_known = false;
+	std::atomic<int> m_ain_want{-2};
+	std::atomic<bool> m_ain_list_want{false};
+	mutable std::mutex m_wave_lock;
+	overview_req m_wave_want;
+	std::array<overview_req, DETAIL_SLOTS> m_detail_want{};
+
 	// 読み手 1 本の輪。put はメッセージを書き終えてから 1 回で位置を進める
 	class ring
 	{
@@ -342,6 +528,7 @@ private:
 	snapshot              m_snap;
 	std::atomic<unsigned> m_xg_seq{0};
 	std::atomic<int>      m_scope_want{-1};
+	std::atomic<u64>      m_part_mute{0};
 	std::atomic<unsigned> m_scope_seq{0};
 	std::vector<float>    m_scope = std::vector<float>(size_t(SCOPE_SRCS) * SCOPE_N);
 	int                   m_scope_part = -1;

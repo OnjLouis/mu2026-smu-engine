@@ -12,6 +12,7 @@
 #include "mu2000.h"
 #include "xg/ram.h"
 
+#include <chrono>
 #include <cstdio>
 #include <initializer_list>
 #include <memory>
@@ -22,6 +23,24 @@ namespace ui {
 
 class driver
 {
+	bridge::sampling_view m_samp;     // sampling_tick の写し（入れ替えて渡す）
+	// 直前の仕事の結果。写しの入れ物は bridge と入れ替えて 2 つを交互に使うので、結果は外に持って
+	// 毎回入れ直す（入れ物に置くと、新しい結果と古い結果が交互に窓へ届いて表示が行き来した）
+	std::string m_samp_msg;
+	struct samp_peak { int number = 0; u32 start = 0, end = 0; int peak = 0; };
+	std::vector<samp_peak> m_samp_peaks;
+	int m_wave_made = -1;              // 見取り図を作ったサンプル（-1 はまだ）
+	u32 m_wave_frames = 0;
+	u32 m_wave_from = 0, m_wave_to = 0;
+	std::vector<s16> m_wave_lo, m_wave_hi;
+	// 拡大した部分（bridge::request_detail）。made が false なら作り直す
+	std::array<bridge::sampling_view::slice, bridge::DETAIL_SLOTS> m_details{};
+	bool m_details_fresh = false;
+	int m_samp_tick = 0;
+	panel_macro m_macro;               // 前面のボタンを決まった順に押す（bridge::request_macro）
+	// マクロが回っている間、1 ブロックで早送りに使う時間（マイクロ秒）。ブロックは 10ms ほどなので、
+	// その半分弱を使い、音を作る残りの仕事に余裕を残す
+	static constexpr int FAST_FORWARD_US = 4000;
 public:
 	// 1 ブロックの頭で。画面から押されているボタンを音源へ
 	void apply_buttons(mu2000 &mu, const bridge &br)
@@ -35,11 +54,131 @@ public:
 		m_applied = want;
 	}
 
+	// サンプリングの窓からの仕事を実行し、表の写しを返す（bridge::post）。
+	// 写しは 8 ブロックに 1 回（512 サンプルのブロックで 90ms ほど）と、仕事をした直後と、録音中は毎回
+	void sampling_tick(mu2000 &mu, bridge &br)
+	{
+		bridge::sampling_job job;
+		bool did = false;
+		while (br.take_job(job)) {
+			m_samp_msg = job(mu);
+			did = true;
+		}
+		// ボタンのマクロ。頼まれたら始め、回っている間は 1 ブロックずつ進める
+		{
+			std::vector<panel_macro::step> steps;
+			std::string done;
+			if (br.take_macro_request(steps, done)) {
+				m_macro.cancel(mu);
+				m_macro.start(std::move(steps), std::move(done));
+				did = true;
+			}
+			std::string msg;
+			bool finished = m_macro.tick(mu, msg);
+			// 早送り。回っている間は、このブロックの中で FAST_FORWARD_US だけ音源を先へ回す（出た音は捨てる）。
+			// 押す間と firmware の読み込みは音の時間で 8 秒ほどかかるが、全速なら実時間の 18 倍ほどで回るので、
+			// 1 秒ほどで済む。firmware の LOAD をそのまま使うので、読み込まれるものは実機で押したのと同じ
+			const auto t0 = std::chrono::steady_clock::now();
+			while (!finished && m_macro.active() &&
+			       std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(FAST_FORWARD_US)) {
+				for (int i = 0; i < 441; i++) {
+					s32 l, r;
+					mu.run_sample(l, r);
+				}
+				finished = m_macro.tick(mu, msg);
+			}
+			if (finished) {
+				m_samp_msg = msg;
+				did = true;   // 読み込みでサンプルの表が変わる
+			}
+		}
+		if (did) {
+			// 波形を書き換える仕事もあるので、測ったものは捨てる
+			m_samp_peaks.clear();
+			m_wave_made = -1;
+			m_details_fresh = false;
+		}
+		const bridge::overview_req want_wave = br.overview_wanted();
+		const bool new_wave = want_wave.number != m_wave_made || want_wave.from != m_wave_from ||
+		                      want_wave.to != m_wave_to;
+		if (new_wave)
+			did = true;
+		const auto want_details = br.details_wanted();
+		bool new_details = !m_details_fresh;
+		for (size_t i = 0; i < want_details.size(); i++)
+			new_details = new_details || want_details[i].number != m_details[i].number ||
+			              want_details[i].from != m_details[i].from || want_details[i].to != m_details[i].to;
+		if (new_details)
+			did = true;
+		if (!did && mu.rec_state() == 0 && !mu.preview_number() && !m_samp.preview_number && ++m_samp_tick < 8)
+			return;
+		m_samp_tick = 0;
+		m_samp.ready = mu.midi_ready();
+		m_samp.message = m_samp_msg;
+		m_samp.samples = mu.sampling_list();
+		// 最大の大きさは、番号・開始・終わりが変わったときだけ測り直す（4MB を毎回は舐めない）
+		if (m_samp_peaks.size() < m_samp.samples.size())
+			m_samp_peaks.resize(m_samp.samples.size());
+		for (size_t i = 0; i < m_samp.samples.size(); i++) {
+			smu2000::sampling::sample &s = m_samp.samples[i];
+			samp_peak &c = m_samp_peaks[i];
+			if (c.number != s.number || c.start != s.start || c.end != s.end) {
+				c.number = s.number;
+				c.start = s.start;
+				c.end = s.end;
+				c.peak = mu.sampling_peak(s);
+			}
+			s.peak = c.peak;
+		}
+		for (int i = 0; i < smu2000::sampling::MAX_VOICES; i++)
+			mu.sampling_voice(i, m_samp.voices[size_t(i)]);
+		m_samp.free_frames = mu.sampling_free_frames();
+		m_samp.rec_state = mu.rec_state();
+		m_samp.rec_frames = mu.rec_frames();
+		m_samp.macro_busy = m_macro.active();
+		m_samp.card_in = mu.card_inserted();
+		if (new_wave) {
+			mu.sampling_overview(want_wave.number, bridge::WAVE_BUCKETS, m_wave_lo, m_wave_hi, m_wave_frames,
+			                      want_wave.from, want_wave.to);
+			m_wave_made = want_wave.number;
+			m_wave_from = want_wave.from;
+			m_wave_to = want_wave.to;
+		}
+		// 入れ物は入れ替えて使うので、見取り図も毎回入れ直す
+		m_samp.wave_number = m_wave_made;
+		m_samp.wave_frames = m_wave_frames;
+		m_samp.wave_from = m_wave_from;
+		m_samp.preview_number = mu.preview_number();
+		m_samp.preview_pos = mu.preview_pos();
+		m_samp.wave_to = m_wave_to;
+		m_samp.wave_lo = m_wave_lo;
+		m_samp.wave_hi = m_wave_hi;
+		if (new_details) {
+			for (size_t i = 0; i < want_details.size(); i++) {
+				bridge::sampling_view::slice &d = m_details[i];
+				d.number = want_details[i].number;
+				d.from = want_details[i].from;
+				d.to = want_details[i].to;
+				u32 frames = 0;
+				d.lo.clear();
+				d.hi.clear();
+				if (d.number && d.to > d.from)
+					mu.sampling_overview(d.number, bridge::DETAIL_BUCKETS, d.lo, d.hi, frames, d.from, d.to);
+			}
+			m_details_fresh = true;
+		}
+		m_samp.details = m_details;
+		m_samp.peak[0] = mu.ad_peak(0);
+		m_samp.peak[1] = mu.ad_peak(1);
+		br.put_sampling(m_samp);
+	}
+
 	// エディタから送られた MIDI を音源へ。echo には MIDI 出力の口を渡す
 	// （実機の THRU と同じで、画面から出したものも外へ出る）
 	template <typename F>
 	void pump_midi(mu2000 &mu, bridge &br, F &&echo)
 	{
+		sampling_tick(mu, br);
 		serve_defaults(mu, br);
 		u8 b;
 		while (br.take_midi(b)) {
@@ -216,6 +355,7 @@ public:
 	             bool ready, const char *message)
 	{
 		br.advance_clock(frames, rate);
+		mu.set_part_mute(br.part_mute());           // ミュート・ソロは次のブロックから効く
 		m_since += frames;
 		if (m_since < rate / 40)
 			return;
@@ -299,6 +439,7 @@ public:
 		s.contrast = u8(mu.lcd_contrast());
 		s.voices_master = u8(mu.swpm().sounding_voices());
 		s.voices_slave  = u8(mu.swps().sounding_voices());
+		s.card   = mu.card_inserted();
 		s.ready  = ready;
 		if (!ready && message)
 			std::snprintf(s.message, sizeof(s.message), "%s", message);

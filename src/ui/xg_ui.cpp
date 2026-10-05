@@ -252,7 +252,7 @@ bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chose
 		}
 		const bool here = current >= 0 && (current >> 7) == msb;
 		char label[64];
-		std::snprintf(label, sizeof(label), "%s（%d）", list[0]->name, int(list.size()));
+		std::snprintf(label, sizeof(label), UI_TEXT(cap_count_fmt, "%s (%d)"), list[0]->name, int(list.size()));
 		const bool open = ImGui::BeginMenu(label);
 		if (help_on() && ImGui::IsItemHovered() && !open)
 			if (const char *h = fx_type_help(msb, list[0]->lsb))
@@ -625,6 +625,19 @@ void out_port_combo()
 	}
 }
 
+bool out_send(bridge &br, std::vector<u8> msg, int port)
+{
+	if (!out_ready())
+		return false;
+	return br.send_out(g_out.dest(port), std::move(msg));
+}
+
+void out_note(const std::string &text)
+{
+	g_out_note = text;
+	g_out_note_at = ImGui::GetTime();
+}
+
 void out_end_frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	if (!out_ready() || g_hover.k == out_kind::none)
@@ -751,13 +764,32 @@ bool g_file_dialogs = false;
 file_ask g_file_ask = file_ask::none;
 std::vector<u8> g_file_out, g_file_in;
 bool g_file_in_ready = false;
+// 頼みと読んだ中身が .syx か WAV か。窓ごとに取り違えないように（マスターの窓とサンプリングの窓）
+bool g_file_ask_wav = false, g_file_in_wav = false;
+// カードの画像（サンプリングの窓の「カード」）。中身は読まず、選ばれた場所だけを返す
+bool g_file_ask_card = false, g_card_path_ready = false;
+std::string g_card_path;
 std::string g_file_note;
+}
+
+void ask_open_card() { g_file_ask = file_ask::open; g_file_ask_wav = false; g_file_ask_card = true; }
+bool file_ask_is_card() { return g_file_ask_card; }
+void give_opened_card(const std::string &path) { g_card_path = path; g_card_path_ready = true; }
+bool take_opened_card(std::string &path)
+{
+	if (!g_card_path_ready)
+		return false;
+	path = std::move(g_card_path);
+	g_card_path_ready = false;
+	return true;
 }
 
 void set_file_dialogs(bool on) { g_file_dialogs = on; }
 bool file_dialogs() { return g_file_dialogs; }
 void ask_save_file(std::vector<u8> bytes) { g_file_out = std::move(bytes); g_file_ask = file_ask::save; }
-void ask_open_file() { g_file_ask = file_ask::open; }
+void ask_open_file() { g_file_ask = file_ask::open; g_file_ask_wav = false; g_file_ask_card = false; }
+void ask_open_wav() { g_file_ask = file_ask::open; g_file_ask_wav = true; g_file_ask_card = false; }
+bool file_ask_is_wav() { return g_file_ask_wav; }
 file_ask take_file_ask(std::vector<u8> &bytes)
 {
 	const file_ask a = g_file_ask;
@@ -767,10 +799,19 @@ file_ask take_file_ask(std::vector<u8> &bytes)
 	g_file_out.clear();
 	return a;
 }
-void give_opened_file(std::vector<u8> bytes) { g_file_in = std::move(bytes); g_file_in_ready = true; }
+void give_opened_file(std::vector<u8> bytes) { g_file_in = std::move(bytes); g_file_in_ready = true; g_file_in_wav = g_file_ask_wav; }
+bool take_opened_wav(std::vector<u8> &bytes)
+{
+	if (!g_file_in_ready || !g_file_in_wav)
+		return false;
+	bytes = std::move(g_file_in);
+	g_file_in.clear();
+	g_file_in_ready = false;
+	return true;
+}
 bool take_opened_file(std::vector<u8> &bytes)
 {
-	if (!g_file_in_ready)
+	if (!g_file_in_ready || g_file_in_wav)
 		return false;
 	bytes = std::move(g_file_in);
 	g_file_in.clear();
@@ -888,7 +929,7 @@ std::string voice_text(int msb, int lsb, int prog)
 	else if (msb == 0 && lsb == 0)
 		std::snprintf(buf, sizeof(buf), "%3d  %s", prog + 1, gm_name(prog));
 	else
-		std::snprintf(buf, sizeof(buf), "%3d  %s（%d/%d）", prog + 1, gm_name(prog), msb, lsb);
+		std::snprintf(buf, sizeof(buf), UI_TEXT(cap_bank_fmt, "%3d  %s (%d/%d)"), prog + 1, gm_name(prog), msb, lsb);
 	return buf;
 }
 
@@ -1114,7 +1155,7 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 					continue;
 				}
 				char with_count[80];
-				std::snprintf(with_count, sizeof(with_count), "%s（%d）", label, int(list->size()));
+				std::snprintf(with_count, sizeof(with_count), UI_TEXT(cap_count_fmt, "%s (%d)"), label, int(list->size()));
 				if (ImGui::BeginMenu(with_count)) {
 					for (const bank_choice &c : *list) {
 						char item[64];
@@ -1985,9 +2026,9 @@ std::string official_name(const char *key)
 	if (const xg::param *p = xg::find(key)) {
 		char b[24];
 		if (p->where == xg::area::part)
-			std::snprintf(b, sizeof(b), "（%02X pp %02X）", p->hi, p->lo);
+			std::snprintf(b, sizeof(b), UI_TEXT(cap_pgm_fmt, "(%02X pp %02X)"), p->hi, p->lo);
 		else
-			std::snprintf(b, sizeof(b), "（%02X %02X %02X）", p->hi, p->mid, p->lo);
+			std::snprintf(b, sizeof(b), UI_TEXT(cap_pgm3_fmt, "(%02X %02X %02X)"), p->hi, p->mid, p->lo);
 		name += b;
 	}
 	return name;

@@ -3,8 +3,9 @@
 // The macOS window system's services, shared with the Windows (ui/window_win.h)
 // and SDL (ui/window_sdl.h) twins.
 //
-// Nothing in this header mentions AppKit. window_mac.mm implements it; that is
-// the only file in the project compiled as Objective-C++.
+// Nothing in this header mentions AppKit. window_mac.mm implements it. It is
+// one of the project's Objective-C++ files, not the only one: shot_mac.mm,
+// pc_window_mac.mm and the plug-in views are too.
 
 #ifndef S_MU2000_UI_WINDOW_MAC_H
 #define S_MU2000_UI_WINDOW_MAC_H

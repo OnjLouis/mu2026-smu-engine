@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "player.h"
+#include "bend_thinner.h"
 
 #include <algorithm>
 #include <chrono>
@@ -80,6 +81,12 @@ void player::run(bridge &br)
 	// Windows, so this reads the same clock the Windows code used to
 	const auto t0 = std::chrono::steady_clock::now();
 
+	auto send = [&br](int to, const u8 *d, size_t n) {
+		if (to == 0)      br.send(d, n);
+		else if (to > 0)  br.send_port(to, d, n);
+	};
+	bend_thinner thinner;   // set_thin_bends のとき
+
 	size_t at = 0;
 	while (!m_quit.load(std::memory_order_acquire) && at < m_events.size()) {
 		const double sec = std::chrono::duration<double>(
@@ -91,14 +98,20 @@ void player::run(bridge &br)
 		// 選んだ扱いに従う（A・B に重ねるか、鳴らさない）
 		const bool fold = m_fold.load(std::memory_order_relaxed);
 		const bool usb = m_usb.load(std::memory_order_relaxed);
+		const bool thin = m_thin.load(std::memory_order_relaxed);
 		while (at < m_events.size() && m_events[at].time <= sec) {
 			const smf::event &e = m_events[at];
 			const int to = smf::mu_port(e.port, fold, usb);
-			if (to == 0)      br.send(e.bytes.data(), e.bytes.size());
-			else if (to > 0)  br.send_port(to, e.bytes.data(), e.bytes.size());
 			at++;
+			if (thin)
+				thinner.event(to, e.bytes.data(), e.bytes.size(), e.time, send);
+			else
+				send(to, e.bytes.data(), e.bytes.size());
 		}
-		if (at >= m_events.size())
+		// 持っているベンドは GAP たったら送る（途中で切りにしたとき・曲の終わりはすぐ）
+		const bool last = at >= m_events.size();
+		thinner.tick(sec, !thin || last, send);
+		if (last)
 			break;
 
 		// 次まで待つ。長く待ちすぎないように刻む

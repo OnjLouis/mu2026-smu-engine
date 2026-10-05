@@ -36,7 +36,7 @@ private:
 	// ドラムセットアップ（DRUMS1-4）の面。行が鍵 13-91、列が 1 鍵ぶんの 23 個
 	void drum_page(xg::model &m, const xg_snapshot &ram, bridge &br);
 	// SysEx の読み解き。左に貼り付ける欄、右に 1 行ずつの意味（ui/sysex_decode.h）
-	void decode_page(xg::model &m);
+	void decode_page(xg::model &m, bridge &br);
 
 	// 1 つの値を触る部品。数を並べる形（普段）と、つまみの形（開いたとき）がある。
 	// 選ぶ種類の値（MONO/POLY など）は品書きになる。width は数の形の幅

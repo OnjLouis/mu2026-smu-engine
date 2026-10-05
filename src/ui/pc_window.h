@@ -89,6 +89,11 @@ private:
 	ImGuiContext           *m_imgui = nullptr;
 	UINT m_resize_w = 0, m_resize_h = 0;     // WM_SIZE で受けて、次に描く前に直す
 	bool m_was_visible = false;              // 前のコマで見えていたか（隠れた瞬間を知る）
+	// ファイルの窓の頼み（xgui::file_ask）と書き出す中身。開くのは描画の外（WM_APP_FILE_DIALOG）。
+	// frame は gui のパネルのコマの途中で呼ばれるので、そこで窓を開くと、窓が回している間に
+	// パネルのタイマーが来てコマが入れ子になり、ImGui が止まる
+	int m_file_ask = 0;
+	std::vector<u8> m_file_bytes;
 #else
 	bool create(std::string &err);
 	void destroy();

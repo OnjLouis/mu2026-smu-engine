@@ -20,6 +20,7 @@
 
 #include "compat/mamecompat.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -144,6 +145,35 @@ public:
 			return 0;
 		const u16 off = word(base + u32(note & 0x7f) * 2);
 		return off == 0xffff ? 0 : DRUM_RECORDS + off;
+	}
+
+	// 内蔵の波形の組（0-502）ごとに、それを要素で使っている音色の名前（重ねない）。
+	// 音色の記録は VOICES から「14 + 84 × 要素の数」バイトずつ並ぶ（先頭のバイトが要素のビットマスク）。
+	// 要素の byte2・3 が組の番号（7bit が 2 つ。xg/native_voice.h の wave_set）。
+	// サンプリングの窓で、サンプル音色に内蔵ウェーブを選ぶときの名前代わり
+	static constexpr int WAVE_SETS = 503;
+	std::vector<std::vector<std::string>> wave_users() const
+	{
+		std::vector<std::vector<std::string>> out(WAVE_SETS);
+		if (!m_ok)
+			return out;
+		for (u32 a = VOICES; a + 14 <= VOICES_END;) {
+			const int mask = byte(a) & 15;
+			int n = 0;
+			for (int i = 0; i < 4; i++)
+				n += (mask >> i) & 1;
+			if (!n)
+				break;
+			const std::string name = trim(std::string(reinterpret_cast<const char *>(at(a + 2)), 10));
+			for (int e = 0; e < n; e++) {
+				const u32 el = a + 12 + u32(e) * 84;
+				const int set = (byte(el + 2) << 7) | (byte(el + 3) & 0x7f);
+				if (set < WAVE_SETS && std::find(out[size_t(set)].begin(), out[size_t(set)].end(), name) == out[size_t(set)].end())
+					out[size_t(set)].push_back(name);
+			}
+			a += 14 + 84 * u32(n);
+		}
+		return out;
 	}
 
 	// 記録の名前（lookup の戻り値から）

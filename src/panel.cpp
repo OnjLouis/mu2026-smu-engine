@@ -15,6 +15,7 @@
 // firmware は 2 行 40 桁で使うが、実機の窓に出ているのは **2 行 24 桁**。
 // 24 桁より先には何も書かれないことを起動画面で確かめた。
 
+#include "compat/cli_text.h"
 #include "mu2000.h"
 #include "smf.h"
 
@@ -123,8 +124,8 @@ void show_lcd(mu2000 &mu)
 	const u8 *img = lcd.render();
 	const int lines = lcd.lines(), cols = lcd.line_size(), rows = lcd.char_size();
 
-	std::printf("LCD %d 行 × %d 桁（表示 %s）\n", lines, cols,
-	            lcd.display_on() ? "オン" : "オフ");
+	std::printf(CLI_T("LCD %d lines x %d columns (display %s)\n", "LCD %d 行 × %d 桁（表示 %s）\n"), lines, cols,
+	            lcd.display_on() ? CLI_T("on", "オン") : CLI_T("off", "オフ"));
 
 	// 1. 文字として
 	const u8 *dd = lcd.ddram();
@@ -154,7 +155,7 @@ void show_lcd(mu2000 &mu)
 	}
 
 	// 生の DDRAM を 40 桁ぶん全部。窓の外に何が書かれているかを見る
-	std::printf("\nDDRAM 40 桁ぶん（. は空白、# は 0x20 未満の作り字）\n");
+	std::printf(CLI_T("\nDDRAM, 40 columns (. is a space, # is a custom character below 0x20)\n", "\nDDRAM 40 桁ぶん（. は空白、# は 0x20 未満の作り字）\n"));
 	for (int line = 0; line < lines; line++) {
 		std::printf("  %d |", line);
 		for (int pos = 0; pos < 40; pos++) {
@@ -164,14 +165,14 @@ void show_lcd(mu2000 &mu)
 		std::printf("|\n");
 	}
 	for (int line = 0; line < lines; line++) {
-		std::printf("  %d 16進:", line);
+		std::printf(CLI_T("  %d hex:", "  %d 16進:"), line);
 		for (int pos = 0; pos < 26; pos++)
 			std::printf(" %02x", dd[line * 0x40 + pos]);
 		std::printf("\n");
 	}
 
 	// firmware が作った字 8 個。セグメント部の絵はこれで描かれている
-	std::printf("\nCGRAM の 8 文字\n");
+	std::printf(CLI_T("\nThe 8 CGRAM characters\n", "\nCGRAM の 8 文字\n"));
 	const u8 *cg = lcd.cgram();
 	for (int y = 0; y < 8; y++) {
 		std::printf("   ");
@@ -195,6 +196,7 @@ void show_lcd(mu2000 &mu)
 
 int main(int argc, char **argv)
 {
+	smu2000::cli::init(argc, argv);       // -jp で日本語
 	std::string dir, keys;
 	bool list = false;
 	int turn = 0;
@@ -244,7 +246,7 @@ int main(int argc, char **argv)
 	}
 
 	if (list) {
-		std::printf("ボタン（左が --keys で使う名前）:\n");
+		std::printf(CLI_T("Buttons (the name on the left is what --keys takes):\n", "ボタン（左が --keys で使う名前）:\n"));
 		for (int i = 0; i < int(mu2000::button::count); i++) {
 			const mu2000::button b = mu2000::button(i);
 			const char *key = "";
@@ -256,7 +258,7 @@ int main(int argc, char **argv)
 	}
 
 	if (dir.empty()) {
-		std::fprintf(stderr, "使い方: panel <rom ディレクトリ> [--keys \"play,edit\"] [--trace]\n");
+		std::fprintf(stderr, CLI_T("Usage: panel <rom directory> [--keys \"play,edit\"] [--trace]\n", "使い方: panel <rom ディレクトリ> [--keys \"play,edit\"] [--trace]\n"));
 		return 1;
 	}
 
@@ -268,18 +270,18 @@ int main(int argc, char **argv)
 		std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1;
 	}
 	if (!mu.load_sintab(dir + "/standin/sin-table.bin"))
-		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+		std::fprintf(stderr, CLI_T("Warning: %s\n", "警告: %s\n"), mu.error().c_str());
 	// 字の絵。roms の下か standin の下を見る
 	if (!mu.load_lcd_font(dir + "/hd44780u_b04.bin") &&
 	    !mu.load_lcd_font(dir + "/standin/hd44780u_b04.bin"))
-		std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+		std::fprintf(stderr, CLI_T("Warning: %s\n", "警告: %s\n"), mu.error().c_str());
 
 	mu.set_threaded(true);
 	// HOST SELECT を USB にして起動する（gui・plugin の既定と同じ）
 	mu.set_usb_host(usb);
 	mu.reset();
 
-	std::printf("起動中...");
+	std::printf(CLI_T("Booting...", "起動中..."));
 	std::fflush(stdout);
 	{
 		const size_t limit = size_t(30.0 * RATE);
@@ -287,7 +289,7 @@ int main(int argc, char **argv)
 		s32 l, r;
 		for (; i < limit && !mu.midi_ready(); i++)
 			mu.run_sample(l, r);
-		std::printf(" %.2f 秒\n", double(i) / RATE);
+		std::printf(CLI_T(" %.2f s\n", " %.2f 秒\n"), double(i) / RATE);
 	}
 	// 起動直後は表示が動いている途中なので、少し落ち着かせる
 	idle(mu, settle);
@@ -299,7 +301,7 @@ int main(int argc, char **argv)
 	}
 
 	if (trace)
-		std::printf("  %-10s %s\n", "(起動)",
+		std::printf("  %-10s %s\n", CLI_T("(boot)", "(起動)"),
 		            (lcd_hex_on ? lcd_hex(mu) : lcd_line(mu)).c_str());
 
 	if (!keys.empty()) {
@@ -328,7 +330,7 @@ int main(int argc, char **argv)
 					break;
 				}
 			if (!found)
-				std::fprintf(stderr, "知らないボタン: %s\n", k.c_str());
+				std::fprintf(stderr, CLI_T("Unknown button: %s\n", "知らないボタン: %s\n"), k.c_str());
 		}
 	}
 
@@ -339,7 +341,7 @@ int main(int argc, char **argv)
 		if (!smf::load(midfile, evs, err)) {
 			std::fprintf(stderr, "%s\n", err.c_str());
 		} else {
-			std::printf("MIDI %zu 件を %.1f 秒まで流す\n", evs.size(), play);
+			std::printf(CLI_T("Feeding %zu MIDI events up to %.1f s\n", "MIDI %zu 件を %.1f 秒まで流す\n"), evs.size(), play);
 			size_t at = 0;
 			const size_t total = size_t(play * RATE);
 			s32 l, r;
@@ -365,7 +367,7 @@ int main(int argc, char **argv)
 				if (!turned && turn_at >= 0.0 && now >= turn_at) {
 					turned = true;
 					mu.turn_encoder(turn_at_n);
-					std::printf("  %.2f 秒でダイヤルを %+d 目盛り\n", now, turn_at_n);
+					std::printf(CLI_T("  at %.2f s, the dial by %+d clicks\n", "  %.2f 秒でダイヤルを %+d 目盛り\n"), now, turn_at_n);
 				}
 				mu.run_sample(l, r);
 				if (!wavfile.empty()) {
@@ -402,12 +404,12 @@ int main(int argc, char **argv)
 					std::fwrite(h, 1, 44, f);
 					std::fwrite(pcm.data(), 2, pcm.size(), f);
 					std::fclose(f);
-					std::printf("  %s に書き出した\n", wavfile.c_str());
+					std::printf(CLI_T("  wrote %s\n", "  %s に書き出した\n"), wavfile.c_str());
 				}
 			}
 		}
 		if (watch) {
-			std::printf("\n出た文字コード（マス、コードと回数）\n");
+			std::printf(CLI_T("\nCharacter codes seen (cell, code and count)\n", "\n出た文字コード（マス、コードと回数）\n"));
 			for (int c = 0; c < 80; c++) {
 				int kinds = 0;
 				for (int v = 0; v < 256; v++) if (seen[c][v]) kinds++;
@@ -423,7 +425,7 @@ int main(int argc, char **argv)
 	if (!holdkey.empty()) {
 		for (const alias &a : ALIASES)
 			if (holdkey == a.key) {
-				std::printf("\n--- %s を %.1f 秒押しっぱなし ---\n",
+				std::printf(CLI_T("\n--- holding %s for %.1f s ---\n", "\n--- %s を %.1f 秒押しっぱなし ---\n"),
 				            mu2000::button_name(a.b), hold);
 				mu.set_button(a.b, true);
 				idle(mu, hold);
@@ -434,7 +436,7 @@ int main(int argc, char **argv)
 	}
 
 	if (turn) {
-		std::printf("\n--- ダイヤルを %+d 目盛り ---\n", turn);
+		std::printf(CLI_T("\n--- the dial by %+d clicks ---\n", "\n--- ダイヤルを %+d 目盛り ---\n"), turn);
 		mu.turn_encoder(turn);
 		// 位相を送り切るまで回す
 		for (int i = 0; i < 400 && mu.encoder_busy(); i++)

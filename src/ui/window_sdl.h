@@ -19,22 +19,15 @@
 
 #pragma once
 
-#include <string>
-
 namespace ui {
 
 class linux_app;
 
-// The SDL3 event loop: it owns the window, renderer and framebuffer, feeds
-// the app mouse/key/drop events and calls paint_main() every 33 ms. Returns
-// when the window closes. seconds_limit on the app ends the run after that
-// many seconds (--seconds: timed runs for smoke tests and demos)
+// The SDL3 event loop: it owns the window and renderer, feeds
+// the app mouse/key/drop events and repaints through Dear ImGui every
+// 33 ms. Returns when the window closes (--seconds ends the run early,
+// read from the app itself).
 int run_window(linux_app &gui, const char *title, int w, int h);
-
-// --selftest: paint twice into separate surfaces and compare the bytes,
-// then upload and read the pixels back through a hidden window. The
-// automatable core of the DIB-vs-window check (doc/porting-linux-gui.md)
-int selftest(const std::string &rom_dir, int w, int h);
 
 } // namespace ui
 

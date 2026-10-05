@@ -2,8 +2,8 @@
 //
 // 画面。実機のフロントパネルと、SOL2 風のエディタの 2 面を持つ。
 //
-// exe（gui.exe）と VST3 の画面で同じものを使う。どちらも Windows なので
-// 描画は GDI で済ませ、外からは HDC を 1 枚渡してもらうだけにしてある。
+// exe（gui.exe）と VST3 の画面で同じものを使う。描画は Dear ImGui で、
+// 窓側は ImDrawList を渡してもらうだけにしてある。
 //
 // 配置は論理座標（LOGICAL_W × LOGICAL_H）で持ち、窓の大きさに合わせて
 // 一律に拡大縮小する。実機の寸法をそのまま写したものではなく、
@@ -21,16 +21,25 @@
 #include "layout.h"
 #include "snapshot.h"
 #include "xg/model.h"
+#include "ui/draw_imgui.h"
+#include "ui/tex.h"
 
 #include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
-// Real GDI on Windows, the CoreGraphics shim on macOS. Either way the panel
-// only ever draws in GDI's coordinates.
+// Geometry and colors (RECT, COLORREF); drawing itself is Dear ImGui.
 #include "compat/gdi.h"
 
+struct ImDrawList;
+struct ImGuiContext;
+
 namespace ui {
+
+namespace im {
+struct fonts;
+}
 
 enum class page { front, editor, effects };
 
@@ -51,11 +60,10 @@ enum : int {
 	CTL_VAR_TYPE  = 504, CTL_VAR_CONN = 505, CTL_VAR_PART = 506,
 	CTL_INS1_TYPE = 507, CTL_INS1_PART = 508,
 	CTL_INS2_TYPE = 509, CTL_INS2_PART = 510,
-	CTL_FX_FIRST  = 500, CTL_FX_COUNT = 11,
 };
 
 // 触れる場所
-enum class spot_kind { none, button, wheel, volume, knob, tab, action, part, list, adgain };
+enum class spot_kind { none, button, wheel, volume, adgain, knob, tab, action, part, list };
 
 struct spot {
 	spot_kind      kind = spot_kind::none;
@@ -77,7 +85,14 @@ public:
 	int  width() const  { return m_w; }
 	int  height() const { return m_h; }
 
-	page current_page() const { return m_page; }
+	// Make the panel's fonts. ImGui's context has to exist and no frame may be
+	// open, so the window code calls this once its context is up: on macOS the
+	// window settles on its final size inside setFrameSize:, before the context
+	// exists, so resize() alone would leave the panel with no fonts at all (and
+	// every label then falls back to ImGui's 16 px default). Safe to repeat --
+	// build_fonts() does nothing unless a size actually moved.
+	void fonts_ready();
+
 
 	// 音量つまみの見え方。音源側の値をそのまま渡してもらう
 	void set_volume(double v) { m_volume_now = v; }
@@ -85,6 +100,7 @@ public:
 	// 論理座標の方眼を重ねる。絵の位置を直すときの物差し（doc/panel-editing.md）
 	void set_grid(bool on) { m_grid = on; }
 	void set_lcd_only(bool on) { m_lcd_only = on; }
+
 
 	// **上に空ける高さ**（画素）。窓の最上段にボタンの帯を出す
 	// ときに使う（`ui/toolbar.h`）。絵は 1000 × 385 の全面を使っていて
@@ -121,10 +137,15 @@ public:
 	// パラメータの層に読ませる（問い合わせはしない）。戻り値は「新しい値を読んだか」
 	bool tick(bridge &br);
 
-	// 描く。status は下に小さく出す 1 行。無ければ空でよい
-	void paint(HDC dc, const snapshot &s, u64 pressed, const char *status) const;
-
-	const std::vector<spot> &spots() const { return m_spots; }
+	// 描く。status は下に小さく出す 1 行。無ければ空でよい。
+	// 字は面板が持つ im::fonts（resize() が作る）。窓側の帯と品書きは
+	// 16 px の固定の組を使うので，这里的 f は渡さない
+	void paint_front(ImDrawList *dl, const snapshot &s, u64 pressed,
+	                 double volume, const char *status) const;
+	void paint_editor(ImDrawList *dl, const char *status) const;
+	void paint_effects(ImDrawList *dl, const char *status) const;
+	// LCD だけを出すモード（--lcd-only）。それ以外は面のどれか
+	void paint(ImDrawList *dl, const snapshot &s, u64 pressed, const char *status) const;
 
 	// パラメータの層の写し。PC エディタも同じものを読み書きする（tick が回している）
 	xg::model &xg() { return m_xg; }
@@ -137,53 +158,79 @@ private:
 	void build_editor_spots();
 	void build_effect_spots();
 
-	void paint_front(HDC dc, const snapshot &s, u64 pressed, double volume,
-	                 const char *status) const;
-	void paint_editor(HDC dc, const char *status) const;
-	void paint_effects(HDC dc, const char *status) const;
+	// ---- The panel's own fonts. Six sizes, worked out from the window scale
+	// and the LCD's dimensions; nothing is rebuilt unless one of them moved
+	// (ImGui rasterizes per size).
+	//
+	// **Also called while painting.** On macOS the window settles on its final
+	// size during setFrameSize:, before the ImGui context exists, so a panel
+	// that only ever built them from resize() ended up with none at all -- and
+	// every label then fell back to ImGui's 16 px default, which is about twice
+	// the size the panel means. Painting is the first moment a context is
+	// guaranteed to be there.
+	void build_fonts() const;
+	void drop_fonts() const;
 
-	// LCD の中の寸法。点の間隔 d（画素）と、上の面の左上 x0 y0、下の面の上端 sy。
-	// 窓の下と右の札も同じ値で置くので、描く側と札の側で分けて計算しない。
-	// df fx0 fy0 fsy は端数つきの本当の値（点が小さく、拡大して描くときだけ
-	// 整数と違う）。k は拡大して描く倍率
+	// ---- LCD
+	// The dimensions inside the LCD window. d is the dot pitch, x0/y0 the top
+	// left of the upper face and sy the top of the lower one; fx0/fy0/fsy are
+	// the same numbers unrounded. The legends below the window take their
+	// positions from the same numbers, so the legend and the thing it names
+	// cannot drift apart.
+	//
+	// df is the pitch the grid is actually laid out on, a multiple of 1/k, and
+	// k is how many times the LCD is drawn before being averaged back down (see
+	// supersample_lcd). Rounding df to whole pixels would leave up to a whole
+	// dot of blank margin -- a fifth of the window at the sizes you get at
+	// startup.
 	struct lcd_geom {
-		int d, pad, x0, y0, tick_h, line_h, scale_h, sy;
-		double df, fx0, fy0, fsy;
-		int k;
+		int    d, pad;                 // dot pitch, border
+		double df;                     // dot pitch, a multiple of 1/k
+		int    k;                      // the magnification df is a multiple of
+		double fx0, fy0, fsy;
+		int    x0, y0, sy;             // the same, rounded to whole pixels
+		int    tick_h, line_h, scale_h;
 	};
 	lcd_geom lcd_grid() const;
-
-	void draw_lcd(HDC dc, const snapshot &s) const;
-	// 点とセグメント。area を LCD の背景で塗ってから g の寸法で描く。
-	// px は出来上がりの 1 画素がこの座標で何単位か（拡大して描くときは倍率）
-	// LCD の決まった形のセグメント（扇・パンの円弧と針・7 セグ・▶ ▼）。
-	// 本体はここへ溜めるだけで、描き上がった LCD の上に縁をぼかして塗る
-	struct lcd_shape {
-		std::vector<double> xy;          // x0 y0 x1 y1 …（本体を描いた座標）
-		COLORREF ink;
-	};
-	void draw_lcd_body(HDC dc, const snapshot &s, const lcd_geom &g,
-	                   const RECT &area, double px, std::vector<lcd_shape> &shapes) const;
-	void draw_lcd_labels(HDC dc, const snapshot &s, const lcd_geom &g) const;
-	// MIC と LINE の箱（上が MIC）。目盛りの番号と下の面のあいだに収める
-	void lcd_tag_boxes(const lcd_geom &g, RECT out[2]) const;
-	// 目盛りの帯の中の高さ。f は帯の上端 0、下端 1 の割合
+	// Height in the tick band, as a fraction: 0 is the band's top, 1 its bottom
 	int band_y(const lcd_geom &g, double f) const;
-	void draw_lcd_message(HDC dc, const snapshot &s) const;
-#ifdef _WIN32
-	bool supersample_lcd(HDC dc, const snapshot &s, const lcd_geom &g, int k,
-	                     std::vector<lcd_shape> &shapes) const;
-#endif
-	void draw_grid(HDC dc) const;
-	void draw_button(HDC dc, const spot &sp, bool down) const;
-	void draw_key_print(HDC dc, const RECT &key, const char *label, const char *sub,
-	                    mu2000::button b, bool down) const;
-	void draw_wheel(HDC dc, int angle) const;
-	void draw_volume(HDC dc, double v) const;
-	void draw_adgain(HDC dc) const;
-	void draw_tabs(HDC dc) const;
-	void draw_knob(HDC dc, const spot &sp) const;
-	void draw_list(HDC dc, const spot &sp) const;
+	// The MIC and LINE boxes (MIC on top)
+	void lcd_tag_boxes(const lcd_geom &g, RECT out[2]) const;
+
+	// Where the LCD's fills land: the draw list at 1:1, or a k-times buffer
+	// that draw_lcd averages back down. The curved segments go into the draw
+	// list either way, so they stay smooth at 1:1.
+	struct lcd_canvas;
+	// Draw the LCD at k times its size and average each k x k block back down.
+	// Returns false if there is nowhere to put the result.
+	bool supersample_lcd(ImDrawList *dl, const snapshot &s, const lcd_geom &g,
+	                     int k) const;
+	// The averaged LCD picture. Sized on resize, re-filled every frame.
+	mutable std::unique_ptr<im::tex> m_lcd_tex;
+	// Its scratch too. These are big (w*k by h*k at k=3 is a couple of MB) and
+	// only change shape on a resize, so they are kept rather than allocated and
+	// freed every frame. Upstream creates two DIBs per frame instead.
+	mutable std::vector<uint32_t> m_lcd_big, m_lcd_flat;
+
+	void draw_lcd(ImDrawList *dl, const snapshot &s) const;
+	void draw_lcd_body(lcd_canvas &cv, const snapshot &s, const lcd_geom &g,
+	                   const RECT &area, double px) const;
+	void draw_lcd_labels(ImDrawList *dl, const snapshot &s, const lcd_geom &g) const;
+	void draw_lcd_message(ImDrawList *dl, const snapshot &s) const;
+
+	void draw_grid(ImDrawList *dl) const;
+	void draw_button(ImDrawList *dl, const spot &sp, bool down) const;
+	// Key-top printing, for when the labels come from the art instead of the
+	// code (panel.txt labels_in_art)
+	void draw_key_print(ImDrawList *dl, const RECT &key, const char *label,
+	                    const char *sub, mu2000::button b, bool down) const;
+	void draw_wheel(ImDrawList *dl, int angle) const;
+	void draw_volume(ImDrawList *dl, double v) const;
+	void draw_adgain(ImDrawList *dl) const;
+	void draw_card(ImDrawList *dl) const;   // 差さっている SmartMedia の縁
+	void draw_tabs(ImDrawList *dl) const;
+	void draw_knob(ImDrawList *dl, const spot &sp) const;
+	void draw_list(ImDrawList *dl, const spot &sp) const;
 	std::string fx_text(int ctl) const;
 	void fx_bounds(int ctl, bool &at_min, bool &at_max) const;
 	void step_fx(int ctl, int step, bridge &br);
@@ -226,7 +273,7 @@ private:
 	// ダイヤルを掴んで上下に動かしているとき（editor.cpp の press / drag）。まだ目盛りにならない端の画素
 	double m_dial_rest = 0.0;
 	double m_volume_now = 1.0;
-	// A/D INPUT のつまみ（0-1）。まだ音には効かせず、回るだけ
+	// The A/D INPUT knob (0-1). It only turns for now, it drives nothing
 	double m_adgain_now = 0.45;
 
 	// ---- エディタとエフェクトの面の値。**画面では覚えない**。
@@ -237,22 +284,16 @@ private:
 	xg_snapshot m_ram;           // 音声の糸が写した RAM（画面の糸だけが触る）
 	u64 m_ram_serial = 0;
 
-	HFONT m_font_label = nullptr, m_font_small = nullptr;
-	// 目盛りの番号用。バー 1 本ぶんの幅に 2 桁を収める
-	HFONT m_font_tiny  = nullptr;
-	// LCD の MIC / LINE の札用。箱の高さから決めるので LCD の寸法しだい
-	HFONT m_font_tag   = nullptr;
-	HFONT m_font_num   = nullptr;   // LCD のパート番号（A1 A2 1-32）
-	HFONT m_font_key   = nullptr;   // キートップの印刷（絵の組みを使うとき）
-	int   m_font_key_em = 9;
-	// キートップの記号（− ＋ ◀ ▶）。縁をぼかした絵を大きさが変わるたびに作る
+	// ---- 字
+	mutable im::fonts m_fonts;
+	mutable int m_font_px[6] = {};        // label small tiny key tag num。0 ならまだ無い
+	mutable ImGuiContext *m_font_ctx = nullptr;   // the context the six were added to
+
+	// キートップの記号（− ＋ ◀ ▶）。縁をぼかした絵。大きさが変わるたびに作る
 	std::shared_ptr<svg_art> m_key_sym[4];
-	// LCD のセグメントの重ね絵。形が変わったときだけ作り直す（draw_lcd）
-	mutable std::vector<uint32_t> m_seg_px;
-	mutable int m_seg_x = 0, m_seg_y = 0, m_seg_w = 0, m_seg_h = 0;
-	mutable u64 m_seg_hash = 0;
 	int m_key_sym_px = 0;
-	int   m_font_tag_em = 8;        // m_font_tag の大きさ（字を箱の真ん中に置くのに使う）
+
+
 	bool   m_grid = false;
 	bool   m_lcd_only = false;
 	layout m_lay;

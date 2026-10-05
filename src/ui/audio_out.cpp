@@ -122,9 +122,10 @@ std::vector<std::string> audio_out::list()
 
 
 bool audio_out::start(int latency_ms, fill_fn fill, std::string &err, bool exclusive,
-                      const std::string &device, bool raw)
+                      const std::string &device, bool raw, bool exact)
 {
 	m_want_raw = raw;
+	m_exact_dev = exact;
 	if (m_thread.joinable())
 		return true;
 
@@ -135,6 +136,15 @@ bool audio_out::start(int latency_ms, fill_fn fill, std::string &err, bool exclu
 	m_fill = std::move(fill);
 	m_quit.store(false);
 	m_err.clear();
+	m_dev_name.clear();
+	// These measurements describe one stream. A new device has a new clock
+	// and possibly a new sample rate, so old frame counts cannot carry over.
+	m_produced.store(0); m_late.store(0);
+	m_busy_ticks.store(0); m_worst_ticks.store(0);
+	m_slack_min.store(~u64(0));
+	m_queue_sum.store(0); m_queue_n.store(0); m_queue_worst.store(0);
+	m_inflight_sum.store(0); m_inflight_n.store(0); m_inflight_worst.store(0);
+	m_cpu_meter.reset();
 
 	m_want_dev = device;
 	m_start_state.store(0);
@@ -146,8 +156,8 @@ bool audio_out::start(int latency_ms, fill_fn fill, std::string &err, bool exclu
 	// 開始に失敗したかどうかだけ待つ。だめなら理由を返す
 	for (int i = 0; i < 400 && m_start_state.load() == 0 && !m_running.load(); i++)
 		Sleep(5);
-	if (!m_running.load() && m_start_state.load() == 2) {
-		m_thread.join();
+	if (!m_running.load()) {
+		stop();
 		err = m_err.empty() ? "音声デバイスを開けない" : m_err;
 		return false;
 	}
@@ -295,25 +305,29 @@ void audio_out::run(int latency_ms, bool want_exclusive)
 	                              __uuidof(IMMDeviceEnumerator), (void **)&en);
 	if (FAILED(hr)) { fail("デバイス一覧の取得", hr); goto done; }
 
-	// 名前で指定されていればそれを探す。無ければ Windows の既定
+	// Prefer an exact menu name, then allow a substring for --audio.
 	if (!m_want_dev.empty()) {
 		IMMDeviceCollection *all = nullptr;
 		if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &all))) {
 			UINT n = 0;
 			all->GetCount(&n);
+			for (int pass = 0; pass < (m_exact_dev ? 1 : 2) && !dev; pass++)
 			for (UINT i = 0; i < n && !dev; i++) {
 				IMMDevice *d = nullptr;
 				if (FAILED(all->Item(i, &d)))
 					continue;
-				if (endpoint_name(d).find(m_want_dev) != std::string::npos)
+				const std::string name = endpoint_name(d);
+				if (pass == 0 ? name == m_want_dev : name.find(m_want_dev) != std::string::npos)
 					dev = d;              // 掴んだまま使う
 				else
 					d->Release();
 			}
 			all->Release();
 		}
-		if (!dev)
+		if (!dev) {
 			m_err = "その名前の再生デバイスが無い: " + m_want_dev;
+			goto done; // a vanished selection must not silently open another output
+		}
 	}
 	if (!dev) {
 		hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
@@ -656,6 +670,8 @@ void audio_out::run(int latency_ms, bool want_exclusive)
 
 			const u64 took = u64(t1.QuadPart - t0.QuadPart);
 			m_busy_ticks.fetch_add(took);
+			m_cpu_meter.add(double(took) / double(m_qpc_freq),
+			                double(want) / double(dev_rate));
 			if (took > m_worst_ticks.load())
 				m_worst_ticks.store(took);
 			m_produced.fetch_add(want);

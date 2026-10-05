@@ -1,0 +1,32 @@
+{
+    "name": "s-mu2000-web",
+    "version": "0.1.0",
+    "description": "WebAssembly offline render and live playback for S-MU2000 (audio only)",
+    "type": "module",
+    "scripts": {
+        "build": "npm run build:wasm && npm run build:standalone && npm run build:page && npm run test:types",
+        "lint": "eslint .",
+        "format": "prettier . --write",
+        "test:types": "npm run lint && tsc -b",
+        "build:wasm": "tsx scripts/build.ts",
+        "build:standalone": "tsx scripts/build-standalone.ts",
+        "build:page": "tsx scripts/build-page.ts",
+        "harness": "node scripts/worklet-harness.mjs",
+        "harness:song": "node scripts/worklet-song-harness.mjs",
+        "render": "tsx src/render.ts",
+        "serve": "npx -y serve dist"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@types/node": "^26.2.0",
+        "esbuild": "^0.28.2",
+        "eslint": "^10.8.1",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-unicorn": "^73.0.0",
+        "globals": "^17.9.0",
+        "prettier": "^3.9.6",
+        "tsx": "^4.23.11",
+        "typescript": "^6.0.3",
+        "typescript-eslint": "^8.66.0"
+    }
+}
