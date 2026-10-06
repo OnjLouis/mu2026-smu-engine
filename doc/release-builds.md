@@ -1,17 +1,19 @@
 # Release automation (continuous build)
 
 Rolling binaries for users who don't build from source.
-One `continuous` prerelease, overwritten on a schedule. Versioned releases stay manual (`v*` tags).
+One `continuous` prerelease, overwritten only by explicit manual dispatch.
+This fork does not publish scheduled or per-push releases. Versioned releases
+stay manual (`v*` tags).
 
 ## Decisions
 
-- **One `continuous` release, not per-push.** The repo does ~10-100 commits/day. Per-push
-  releases would spam tags, confuse users ("which of 13 today's builds?"), and burn Actions
-  minutes. `build.yml` still validates every push; only publishing is scheduled.
-- **Schedule: every 10h + manual.** `cron: 0 */10 * * *` (~2-3 builds/day, always <1 day stale)
-  plus `workflow_dispatch`. No `on: push` publishing. A `freshness` job compares
-  `refs/tags/continuous` with the commit being built and skips scheduled runs when
-  main hasn't moved (manual dispatches always build).
+- **One `continuous` release, not per-push.** `build.yml` still validates every
+  push; build validation does not publish a release.
+- **Manual publication only.** `workflow_dispatch` is the only release trigger.
+  The `freshness` entry job and `publish` job independently require a manual
+  event, so adding a schedule or push trigger alone cannot re-enable publication.
+  Preserve these fork-specific guards during upstream merges. A maintainer must
+  obtain explicit release authorization before dispatching the workflow.
 - **Tests gate publishing.** Every packaging job runs `make test` first (Linux under
   `SDL_VIDEODRIVER=dummy`, like `build.yml`); `publish` needs all three jobs, so a
   broken main never overwrites the downloads.
@@ -73,15 +75,17 @@ and other dev tools are not in `all` and not shipped. ROMs, `bootcache/`, `nvram
 
 `.github/workflows/release.yml`:
 
-- `on: schedule: [cron: 0 */10 * * *], workflow_dispatch:`
-- `concurrency: group: continuous, cancel-in-progress: false` (don't overlap publishes).
+- `on: workflow_dispatch:` only; no schedule or push release trigger.
+- `concurrency: group: continuous-release, cancel-in-progress: false` (don't overlap publishes).
+- Entry and publishing jobs require `github.event_name == 'workflow_dispatch'`.
 - Jobs `pkg-windows` (msys2 mingw64), `pkg-linux` (ubuntu + full SDL3 + appimagetool),
   `pkg-macos` (`UNIVERSAL=1`). Each: build → `scripts/package-<os>.sh <build-dir> <dist-dir>`
   → `actions/upload-artifact`.
 - Job `publish` (needs all three, `ubuntu-latest`): download artifacts, stamp
   `README-release.txt` with SHA/date, zip/tar, push to tag `continuous` with
   `softprops/action-gh-release` (`prerelease: true, make_latest: true, files: ...`).
-  Versioned releases: same packaging scripts, triggered by `push: tags: v*` (future work).
+  Versioned release automation is not enabled; adding it requires a separate
+  explicitly authorized change.
 
 ## Linux AppImage detail
 

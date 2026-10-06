@@ -1,13 +1,13 @@
 # Rolling "continuous" binaries (see doc/release-builds.md).
 #
-# Publishes ONE prerelease on tag `continuous`, overwritten on a schedule
-# (every 10h) + manual dispatch. Per-push validation stays in build.yml;
+# Publishes ONE prerelease on tag `continuous`, only by explicit manual
+# dispatch. Per-push validation stays in build.yml;
 # this workflow only publishes. AUv3 is excluded (needs baked ROMs).
 # Linux ships a tarball (bin/ + plugins/) plus a gui AppImage.
 #
 # Guards:
-# - `freshness` skips scheduled runs when main hasn't moved since the last
-#   continuous build (manual dispatches always build).
+# - `freshness` and `publish` reject all non-manual events. Preserve these
+#   guards when importing upstream workflow changes.
 # - every pkg job runs `make test` first; `publish` needs all three, so a
 #   broken main never overwrites the downloads.
 # - `publish` force-moves the `continuous` tag to the built commit BEFORE
@@ -22,8 +22,6 @@
 name: continuous-release
 
 on:
-  schedule:
-    - cron: "0 */10 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -34,28 +32,17 @@ permissions:
   contents: write
 
 jobs:
-  # Skip scheduled runs with nothing new: if refs/tags/continuous already
-  # points at the commit being built, there is nothing to publish.
+  # Manual-only entry gate, even if a future upstream merge adds a trigger.
   freshness:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.check.outputs.build }}
     steps:
       - id: check
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "manual dispatch: always build"
-            exit 0
-          fi
-          TAG_SHA="$(git ls-remote "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" refs/tags/continuous | grep -v '\^{}' | head -1 | awk '{print $1}')"
-          echo "continuous tag: ${TAG_SHA:-<none>}, this run: ${{ github.sha }}"
-          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" = "${{ github.sha }}" ]; then
-            echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "main unchanged since last continuous build: skipping"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "explicit manual dispatch: build authorized"
 
   pkg-windows:
     needs: freshness
@@ -161,7 +148,7 @@ jobs:
 
   publish:
     needs: [freshness, pkg-windows, pkg-macos, pkg-linux]
-    if: needs.freshness.outputs.build == 'true'
+    if: github.event_name == 'workflow_dispatch' && needs.freshness.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 pinned
@@ -188,8 +175,8 @@ jobs:
           Unofficial project, not affiliated with Yamaha.
 
           WARNING: unsigned, work-in-progress snapshot. It may be broken;
-          it is rebuilt from main about every 10 hours whether or not anyone
-          has looked at it. For something stable, wait for a versioned release.
+          it is published from main only by an explicit manual release run.
+          For something stable, wait for a versioned release.
 
           ROMs are NOT included and never will be. Extract them from your own
           MU2000 and point the app at the folder (argv, roms.txt, or
@@ -219,7 +206,7 @@ jobs:
           prerelease: true
           make_latest: true
           body: |
-            Rolling build from `main` (about every 10h, skipped when main hasn't moved).
+            Manually published development snapshot from `main`. No scheduled publication.
 
             **Unsigned, work-in-progress snapshot — expect breakage.** macOS builds are
             not signed or notarized, so Gatekeeper will warn (see `README-release.txt`
